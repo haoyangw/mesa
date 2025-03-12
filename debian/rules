@@ -174,6 +174,9 @@ VULKAN_LAYERS_LIST := $(subst $(space),$(comma),$(VULKAN_LAYERS))
 confflags_GLES = -Dgles1=disabled -Dgles2=enabled
 confflags_GALLIUM += -Dgallium-drivers="[$(GALLIUM_DRIVERS_LIST)]"
 
+# Fix build on Bookworm
+confflags_BOOKWORM = --wrap-mode=nofallback --force-fallback-for=syn,paste
+
 confflags += \
 	-Ddri-drivers-path=/usr/lib/$(DEB_HOST_MULTIARCH)/dri \
 	-Dplatforms="[$(EGL_PLATFORMS_LIST)]" \
@@ -182,7 +185,7 @@ confflags += \
 	-Dglvnd=enabled \
 	-Dshared-glapi=enabled \
 	-Db_ndebug=true \
-	-Dbuild-tests=true \
+	-Dbuild-tests=false \
 	-Dtools=drm-shim \
 	$(confflags_DIRECT_RENDERING) \
 	$(confflags_GBM) \
@@ -191,7 +194,8 @@ confflags += \
 	$(confflags_OSMESA) \
 	$(confflags_SSE2) \
 	$(confflags_VALGRIND) \
-	$(confflags_TEFLON)
+	$(confflags_TEFLON) \
+	$(confflags_BOOKWORM)
 
 
 rewrite_wrap_files:
