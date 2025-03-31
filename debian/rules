@@ -311,6 +311,7 @@ override_dh_makeshlibs:
 
 %:
 	dh $@ \
+		--parallel \
 		--builddirectory=build/ \
 		--buildsystem=meson
 
