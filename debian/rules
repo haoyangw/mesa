@@ -319,7 +319,7 @@ create_native_file:
 	# Override llvm-config used to support compiling with older LLVM suite when multiple LLVM 
 	#   suites are installed
 	echo "[binaries]" > debian/bookworm-llvm.ini
-	echo "/usr/lib/llvm-$(LLVM_VERSION)/bin/llvm-config" >> debian/bookworm-llvm.ini
+	echo "llvm-config = '/usr/lib/llvm-$(LLVM_VERSION)/bin/llvm-config'" >> debian/bookworm-llvm.ini
 
 # For maintainer use only, generate a tarball:
 gentarball:
