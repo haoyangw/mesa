@@ -165,7 +165,7 @@ ifeq ($(DEB_HOST_ARCH), i386)
 endif
 
 # Build syn library from local subproject to fix compilation on Bookworm
-confflags_BOOKWORM = --force-fallback-for=syn --native-file debian/bookworm-llvm.ini
+confflags_BOOKWORM = --force-fallback-for=syn --native-file $(CURDIR)/debian/bookworm-llvm.ini
 
 empty:=
 space := $(empty) $(empty)
