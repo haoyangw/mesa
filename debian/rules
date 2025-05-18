@@ -164,6 +164,9 @@ ifeq ($(DEB_HOST_ARCH), i386)
 	confflags_SSE2 = -Dsse2=false
 endif
 
+# Build syn library from local subproject to fix compilation on Bookworm
+confflags_BOOKWORM = --force-fallback-for=syn
+
 empty:=
 space := $(empty) $(empty)
 comma := ,
@@ -196,7 +199,8 @@ confflags += \
 	$(confflags_OSMESA) \
 	$(confflags_SSE2) \
 	$(confflags_VALGRIND) \
-	$(confflags_TEFLON)
+	$(confflags_TEFLON) \
+	$(confflags_BOOKWORM)
 
 
 rewrite_wrap_files:
