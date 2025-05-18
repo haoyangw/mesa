@@ -1,3 +1,12 @@
+mesa (25.0.5-1+rusticl) bookworm; urgency=medium
+
+  * Modify build dependencies and meson config to fix compiling with rusticl
+    on Bookworm.
+  * Disable radeonsi Gallium driver and amdgpu Vulkan driver to lower
+    build dependency requirements.
+
+ -- Wang Haoyang <haoyangw@gmail.com>  Sun, 18 May 2025 21:59:00 +0800
+
 mesa (25.0.5-1) unstable; urgency=medium
 
   [ Simon McVittie ]
