@@ -50,7 +50,7 @@ Build-Depends:
  libwayland-egl-backend-dev (>= 1.15.0) [linux-any],
  llvm-15-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  libclang-15-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
- libclang-cpp19-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
+ libclang-cpp15-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  libclc-15-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  libclc-15 [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  wayland-protocols (>= 1.34),
