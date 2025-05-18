@@ -165,7 +165,7 @@ ifeq ($(DEB_HOST_ARCH), i386)
 endif
 
 # Build syn library from local subproject to fix compilation on Bookworm
-confflags_BOOKWORM = --force-fallback-for=syn
+confflags_BOOKWORM = --force-fallback-for=syn --native-file debian/bookworm-llvm.ini
 
 empty:=
 space := $(empty) $(empty)
@@ -212,7 +212,7 @@ rewrite_wrap_files:
 	done
 	touch subprojects/rewrite
 
-override_dh_clean: regen_control
+override_dh_clean: regen_control create_native_file
 	dpkg-parsechangelog | awk '/^Version:/ {print $$2}' | sed 's/-.*//;s/~/-/' > VERSION
 	rm -rf .pc
 	rm -rf build
@@ -314,6 +314,12 @@ override_dh_makeshlibs:
 	dh $@ \
 		--builddirectory=build/ \
 		--buildsystem=meson
+
+create_native_file:
+	# Override llvm-config used to support compiling with older LLVM suite when multiple LLVM 
+	#   suites are installed
+	echo "[binaries]" > debian/bookworm-llvm.ini
+	echo `/usr/lib/llvm-$$LLVM_VERSION/bin/llvm-config` >> debian/bookworm-llvm.ini
 
 # For maintainer use only, generate a tarball:
 gentarball:
