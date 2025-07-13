@@ -1,3 +1,9 @@
+mesa (25.1.5-1~deb12u1) bookworm; urgency=medium
+
+  * Update Bookworm backport to Mesa 25.1.5 from Debian Experimental
+
+ -- Wang Haoyang <haoyangw@gmail.com>  Sun, 13 Jul 2025 21:53:20 +0800
+
 mesa (25.1.5-1) experimental; urgency=medium
 
   [ Jianfeng Liu ]
