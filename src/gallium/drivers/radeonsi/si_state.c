@@ -18,6 +18,7 @@
 #include "util/u_resource.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_blend.h"
+#include "util/u_process.h"
 
 #include "ac_cmdbuf.h"
 #include "ac_descriptors.h"
@@ -1074,8 +1075,6 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
       (state->fill_back != PIPE_POLYGON_MODE_FILL && !(state->cull_face & PIPE_FACE_BACK));
 
    rs->pa_su_sc_mode_cntl = S_028814_PROVOKING_VTX_LAST(!state->flatshade_first) |
-                            S_028814_CULL_FRONT((state->cull_face & PIPE_FACE_FRONT) ? 1 : 0) |
-                            S_028814_CULL_BACK((state->cull_face & PIPE_FACE_BACK) ? 1 : 0) |
                             S_028814_FACE(!state->front_ccw) |
                             S_028814_POLY_OFFSET_FRONT_ENABLE(util_get_offset(state, state->fill_front)) |
                             S_028814_POLY_OFFSET_BACK_ENABLE(util_get_offset(state, state->fill_back)) |
@@ -1088,6 +1087,9 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
                                                           sscreen->info.gfx_level < GFX12 ?
                                                              polygon_mode_enabled ||
                                                              rs->perpendicular_end_caps : 0);
+   rs->pa_su_cull_bits = S_028814_CULL_FRONT((state->cull_face & PIPE_FACE_FRONT) ? 1 : 0) |
+                         S_028814_CULL_BACK((state->cull_face & PIPE_FACE_BACK) ? 1 : 0);
+
    if (sscreen->info.gfx_level >= GFX10) {
       rs->pa_cl_ngg_cntl = S_028838_INDEX_BUF_EDGE_FLAG_ENA(rs->polygon_mode_is_points ||
                                                             rs->polygon_mode_is_lines) |
@@ -1145,6 +1147,22 @@ static void *si_create_rs_state(struct pipe_context *ctx, const struct pipe_rast
 static void si_pm4_emit_rasterizer(struct si_context *sctx, unsigned index)
 {
    struct si_state_rasterizer *state = sctx->queued.named.rasterizer;
+   const unsigned cull_bits = S_028814_CULL_FRONT(1) | S_028814_CULL_BACK(1);
+   unsigned last_pa_su_sc_mode_nctl = sctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_SC_MODE_CNTL];
+   unsigned pa_su_sc_mode_cntl;
+
+   if (!sctx->fixed_func_face_culling_has_effect &&
+       (last_pa_su_sc_mode_nctl & ~cull_bits) == state->pa_su_sc_mode_cntl) {
+      /* Keep the previous cull bits because they have no effect. */
+      pa_su_sc_mode_cntl = last_pa_su_sc_mode_nctl;
+   } else if (sctx->fixed_func_face_culling_needed) {
+      pa_su_sc_mode_cntl = state->pa_su_sc_mode_cntl | state->pa_su_cull_bits;
+   } else {
+      pa_su_sc_mode_cntl = state->pa_su_sc_mode_cntl;
+   }
+
+   if (sctx->fixed_func_face_culling_needed)
+      pa_su_sc_mode_cntl |= state->pa_su_cull_bits;
 
    if (sctx->screen->info.gfx_level >= GFX12) {
       radeon_begin(&sctx->gfx_cs);
@@ -1165,7 +1183,7 @@ static void si_pm4_emit_rasterizer(struct si_context *sctx, unsigned index)
       gfx12_opt_set_context_reg(R_028A48_PA_SC_MODE_CNTL_0, SI_TRACKED_PA_SC_MODE_CNTL_0,
                                 state->pa_sc_mode_cntl_0);
       gfx12_opt_set_context_reg(R_02881C_PA_SU_SC_MODE_CNTL, SI_TRACKED_PA_SU_SC_MODE_CNTL,
-                                state->pa_su_sc_mode_cntl);
+                                pa_su_sc_mode_cntl);
       gfx12_opt_set_context_reg(R_028838_PA_CL_NGG_CNTL, SI_TRACKED_PA_CL_NGG_CNTL,
                                 state->pa_cl_ngg_cntl);
       gfx12_opt_set_context_reg(R_028230_PA_SC_EDGERULE, SI_TRACKED_PA_SC_EDGERULE,
@@ -1210,7 +1228,7 @@ static void si_pm4_emit_rasterizer(struct si_context *sctx, unsigned index)
       gfx11_opt_set_context_reg(R_028A48_PA_SC_MODE_CNTL_0, SI_TRACKED_PA_SC_MODE_CNTL_0,
                                 state->pa_sc_mode_cntl_0);
       gfx11_opt_set_context_reg(R_028814_PA_SU_SC_MODE_CNTL, SI_TRACKED_PA_SU_SC_MODE_CNTL,
-                                state->pa_su_sc_mode_cntl);
+                                pa_su_sc_mode_cntl);
       gfx11_opt_set_context_reg(R_028838_PA_CL_NGG_CNTL, SI_TRACKED_PA_CL_NGG_CNTL,
                                 state->pa_cl_ngg_cntl);
       gfx11_opt_set_context_reg(R_028230_PA_SC_EDGERULE, SI_TRACKED_PA_SC_EDGERULE,
@@ -1255,7 +1273,7 @@ static void si_pm4_emit_rasterizer(struct si_context *sctx, unsigned index)
       radeon_opt_set_context_reg(R_028A48_PA_SC_MODE_CNTL_0, SI_TRACKED_PA_SC_MODE_CNTL_0,
                                  state->pa_sc_mode_cntl_0);
       radeon_opt_set_context_reg(R_028814_PA_SU_SC_MODE_CNTL,
-                                 SI_TRACKED_PA_SU_SC_MODE_CNTL, state->pa_su_sc_mode_cntl);
+                                 SI_TRACKED_PA_SU_SC_MODE_CNTL, pa_su_sc_mode_cntl);
       if (sctx->gfx_level >= GFX10) {
          radeon_opt_set_context_reg(R_028838_PA_CL_NGG_CNTL, SI_TRACKED_PA_CL_NGG_CNTL,
                                     state->pa_cl_ngg_cntl);
@@ -3660,7 +3678,7 @@ void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf
       .gfx10_oob_select = V_008F0C_OOB_SELECT_STRUCTURED_WITH_OFFSET,
    };
 
-   ac_build_buffer_descriptor(screen->info.gfx_level, &buffer_state, &state[4]);
+   ac_build_buffer_descriptor(screen->info.gfx_level, &buffer_state, &state[0]);
 }
 
 /**
@@ -4445,6 +4463,7 @@ static void *si_create_vertex_elements(struct pipe_context *ctx, unsigned count,
       v->elem[i].src_offset = elements[i].src_offset;
       v->elem[i].stride = elements[i].src_stride;
       v->vertex_buffer_index[i] = vbo_index;
+      v->num_vertex_buffers = MAX2(v->num_vertex_buffers, vbo_index + 1);
 
       bool always_fix = false;
       union si_vs_fix_fetch fix_fetch;
@@ -4614,16 +4633,15 @@ static void si_bind_vertex_elements(struct pipe_context *ctx, void *state)
       v = sctx->no_velems_state;
 
    sctx->vertex_elements = v;
-   sctx->num_vertex_elements = v->count;
+   sctx->num_vertex_elements = si_vs_uses_vbos(sctx->shader.vs.cso) ? v->count : 0;
    sctx->vertex_buffers_dirty = sctx->num_vertex_elements > 0;
+   sctx->vertex_buffer_unaligned = 0;
+#ifndef NDEBUG
+   sctx->vertex_elements_but_no_buffers = v->count > 0;
+#endif
 
    if (old->instance_divisor_is_one != v->instance_divisor_is_one ||
        old->instance_divisor_is_fetched != v->instance_divisor_is_fetched ||
-       (old->vb_alignment_check_mask ^ v->vb_alignment_check_mask) &
-       sctx->vertex_buffer_unaligned ||
-       ((v->vb_alignment_check_mask & sctx->vertex_buffer_unaligned) &&
-        memcmp(old->vertex_buffer_index, v->vertex_buffer_index,
-               sizeof(v->vertex_buffer_index[0]) * MAX2(old->count, v->count))) ||
        /* fix_fetch_{always,opencode,unaligned} and hw_load_is_dword are
         * functions of fix_fetch and the src_offset alignment.
         * If they change and fix_fetch doesn't, it must be due to different
@@ -4644,6 +4662,13 @@ static void si_bind_vertex_elements(struct pipe_context *ctx, void *state)
       cb.buffer_size = 0xffffffff;
       si_set_internal_const_buffer(sctx, SI_VS_CONST_INSTANCE_DIVISORS, &cb);
    }
+
+   /* Unbind all vertex buffers. set_vertex_buffers is required to be called after this.
+    * If it's not called, no buffers will be enabled.
+    */
+   unsigned old_num_vertex_buffers = old->num_vertex_buffers;
+   for (unsigned i = 0; i < old_num_vertex_buffers; i++)
+      pipe_resource_reference(&sctx->vertex_buffer[i].buffer.resource, NULL);
 }
 
 static void si_delete_vertex_element(struct pipe_context *ctx, void *state)
@@ -4666,7 +4691,8 @@ static void si_set_vertex_buffers(struct pipe_context *ctx, unsigned count,
    unsigned i;
 
    assert(count <= ARRAY_SIZE(sctx->vertex_buffer));
-   assert(!count || buffers);
+   assert(!count || (buffers && sctx->vertex_elements &&
+                     count == sctx->vertex_elements->num_vertex_buffers));
 
    for (i = 0; i < count; i++) {
       const struct pipe_vertex_buffer *src = buffers + i;
@@ -4689,13 +4715,11 @@ static void si_set_vertex_buffers(struct pipe_context *ctx, unsigned count,
       }
    }
 
-   unsigned last_count = sctx->num_vertex_buffers;
-   for (; i < last_count; i++)
-      pipe_resource_reference(&sctx->vertex_buffer[i].buffer.resource, NULL);
-
-   sctx->num_vertex_buffers = count;
-   sctx->vertex_buffers_dirty = sctx->num_vertex_elements > 0;
+   sctx->vertex_buffers_dirty = count > 0;
    sctx->vertex_buffer_unaligned = unaligned;
+#ifndef NDEBUG
+   sctx->vertex_elements_but_no_buffers = false;
+#endif
 
    /* Check whether alignment may have changed in a way that requires
     * shader changes. This check is conservative: a vertex buffer can only
@@ -4830,6 +4854,7 @@ void si_init_state_compute_functions(struct si_context *sctx)
    sctx->b.delete_sampler_state = si_delete_sampler_state;
    sctx->b.create_sampler_view = si_create_sampler_view;
    sctx->b.sampler_view_destroy = si_sampler_view_destroy;
+   sctx->b.sampler_view_release = u_default_sampler_view_release;
 }
 
 void si_init_state_functions(struct si_context *sctx)
@@ -4934,6 +4959,16 @@ static void si_init_compute_preamble_state(struct si_context *sctx,
    ac_init_compute_preamble_state(&preamble_state, &pm4->base);
 }
 
+static bool is_process_name_param(const char *name, const char *param)
+{
+   if (!strstr(util_get_process_name(), name))
+      return false;
+
+   char cmdline[1024];
+   util_get_command_line(cmdline, sizeof(cmdline));
+   return strstr(cmdline, param) != NULL;
+}
+
 static void si_init_graphics_preamble_state(struct si_context *sctx,
                                             struct si_pm4_state *pm4)
 {
@@ -4943,7 +4978,9 @@ static void si_init_graphics_preamble_state(struct si_context *sctx,
 
    const struct ac_preamble_state preamble_state = {
       .border_color_va = border_color_va,
-      .gfx10.cache_rb_gl2 = sctx->gfx_level >= GFX10 && sscreen->options.cache_rb_gl2,
+      .gfx10.cache_cb_gl2 = sctx->gfx_level >= GFX10 && sscreen->options.cache_cb_gl2,
+      .gfx10.cache_db_gl2 = sctx->gfx_level >= GFX10 && sscreen->options.cache_db_gl2 &&
+                            !is_process_name_param("GpuTest", "fur"),
    };
 
    ac_init_graphics_preamble_state(&preamble_state, &pm4->base);
@@ -5170,6 +5207,8 @@ static void gfx12_init_gfx_preamble_state(struct si_context *sctx)
 
    ac_pm4_set_reg(&pm4->base, R_028C54_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
                   S_028C54_NULL_SQUAD_AA_MASK_ENABLE(1));
+
+   ac_pm4_set_reg(&pm4->base, R_00B2B8_SPI_SHADER_GS_MESHLET_CTRL, 0);
 
 done:
    sctx->cs_preamble_state = pm4;

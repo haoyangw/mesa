@@ -482,6 +482,7 @@ static void *r600_create_rs_state(struct pipe_context *ctx,
 			S_028810_DX_RASTERIZATION_KILL(state->rasterizer_discard);
 	}
 	rs->multisample_enable = state->multisample;
+	rs->line_width = state->line_width;
 
 	/* offset */
 	rs->offset_units = state->offset_units;
@@ -497,6 +498,7 @@ static void *r600_create_rs_state(struct pipe_context *ctx,
 		psize_min = state->point_size;
 		psize_max = state->point_size;
 	}
+	rs->max_point_size = psize_max;
 
 	sc_mode_cntl = S_028A4C_MSAA_ENABLE(state->multisample) |
 		       S_028A4C_LINE_STIPPLE_ENABLE(state->line_stipple_enable) |
@@ -3105,6 +3107,7 @@ void r600_init_state_functions(struct r600_context *rctx)
 	r600_add_atom(rctx, &rctx->b.render_cond_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.begin_atom, id++);
 	r600_add_atom(rctx, &rctx->b.streamout.enable_atom, id++);
+	r600_add_atom(rctx, &rctx->b.window_rectangles.atom, id++);
 	for (i = 0; i < R600_NUM_HW_STAGES; i++)
 		r600_init_atom(rctx, &rctx->hw_shader_stages[i].atom, id++, r600_emit_shader, 0);
 	r600_init_atom(rctx, &rctx->shader_stages.atom, id++, r600_emit_shader_stages, 0);

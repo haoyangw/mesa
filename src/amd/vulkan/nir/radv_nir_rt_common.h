@@ -7,8 +7,7 @@
 #ifndef RADV_RT_COMMON_H
 #define RADV_RT_COMMON_H
 
-#include "nir/nir.h"
-#include "nir/nir_builder.h"
+#include "nir/nir_defines.h"
 #include "vk_nir_convert_ycbcr.h"
 
 #include "compiler/spirv/spirv.h"
@@ -22,7 +21,7 @@ nir_def *nir_build_vec3_mat_mult(nir_builder *b, nir_def *vec, nir_def *matrix[]
 void nir_build_wto_matrix_load(nir_builder *b, nir_def *instance_addr, nir_def **out);
 
 nir_def *radv_load_vertex_position(struct radv_device *device, nir_builder *b, nir_def *instance_addr,
-                                   nir_def *primitive_id, uint32_t index);
+                                   nir_def *geometry_id, nir_def *primitive_id, uint32_t index);
 
 struct radv_ray_traversal_args;
 

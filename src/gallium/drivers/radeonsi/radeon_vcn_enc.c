@@ -160,7 +160,8 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
    else {
       uint32_t width_in_block, height_in_block;
       uint32_t block_length;
-      int32_t i, j, pa_format = 0;
+      int32_t i, j;
+      bool pa_format = false;
 
       qp_map->version = sscreen->info.vcn_ip_version >= VCN_5_0_0
                         ? RENCODE_QP_MAP_VCN5 : RENCODE_QP_MAP_LEGACY;
@@ -170,7 +171,7 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
       if (enc->enc_pic.rc_session_init.rate_control_method &&
             (qp_map->version ==  RENCODE_QP_MAP_LEGACY)) {
          enc->enc_pic.enc_qp_map.qp_map_type = RENCODE_QP_MAP_TYPE_MAP_PA;
-         pa_format = 1;
+         pa_format = true;
       }
       else
          enc->enc_pic.enc_qp_map.qp_map_type = RENCODE_QP_MAP_TYPE_DELTA;
@@ -194,7 +195,7 @@ static void radeon_vcn_enc_get_roi_param(struct radeon_encoder *enc,
             /* mapped av1 qi into the legacy qp range by dividing by 5 and
              * rounding up in any rate control mode.
              */
-            if (is_av1 && (pa_format || (qp_map->version ==  RENCODE_QP_MAP_VCN5))) {
+            if (is_av1 && pa_format) {
                if (region->qp_value > 0)
                   av1_qi_value = (region->qp_value + 2) / 5;
                else if (region->qp_value < 0)
@@ -296,7 +297,9 @@ static void radeon_vcn_enc_h264_get_spec_misc_param(struct radeon_encoder *enc,
       pic->pic_ctrl.constrained_intra_pred_flag;
    enc->enc_pic.spec_misc.half_pel_enabled = 1;
    enc->enc_pic.spec_misc.quarter_pel_enabled = 1;
-   enc->enc_pic.spec_misc.weighted_bipred_idc = 0;
+   enc->enc_pic.spec_misc.weighted_bipred_idc =
+      pic->pic_ctrl.weighted_bipred_idc != 1 ?
+      pic->pic_ctrl.weighted_bipred_idc : 0;
    enc->enc_pic.spec_misc.transform_8x8_mode =
       sscreen->info.vcn_ip_version >= VCN_5_0_0 &&
       pic->pic_ctrl.transform_8x8_mode_flag;
@@ -1112,11 +1115,6 @@ static void radeon_enc_flush(struct pipe_video_codec *encoder)
    flush(enc, PIPE_FLUSH_ASYNC, NULL);
 }
 
-static void radeon_enc_cs_flush(void *ctx, unsigned flags, struct pipe_fence_handle **fence)
-{
-   // just ignored
-}
-
 /* configure reconstructed picture offset */
 static void radeon_enc_rec_offset(rvcn_enc_reconstructed_picture_t *recon,
                                   uint32_t *offset,
@@ -1198,7 +1196,7 @@ static int setup_cdf(struct radeon_encoder *enc)
 
    p_cdf = enc->ws->buffer_map(enc->ws,
                                enc->cdf->res->buf,
-                              &enc->cs,
+                               NULL,
                                PIPE_MAP_READ_WRITE | RADEON_MAP_TEMPORARY);
    if (!p_cdf)
       goto error;
@@ -1446,7 +1444,7 @@ static int generate_roi_map(struct radeon_encoder *enc)
 
    p_roi = enc->ws->buffer_map(enc->ws,
                                enc->roi->res->buf,
-                              &enc->cs,
+                               NULL,
                                PIPE_MAP_READ_WRITE | RADEON_MAP_TEMPORARY);
    if (!p_roi)
       goto error;
@@ -1555,12 +1553,12 @@ static void radeon_enc_begin_frame(struct pipe_video_codec *encoder,
 
    if (dpb_slots > enc->dpb_slots) {
       setup_dpb(enc, dpb_slots);
-      if (!si_vid_resize_buffer(enc->base.context, &enc->cs, enc->dpb, enc->dpb_size, NULL)) {
+      if (!si_vid_resize_buffer(enc->base.context, enc->dpb, enc->dpb_size, NULL)) {
          RADEON_ENC_ERR("Can't resize DPB buffer.\n");
          goto error;
       }
       if (sscreen->info.vcn_ip_version >= VCN_5_0_0 && enc->metadata_size &&
-          !si_vid_resize_buffer(enc->base.context, &enc->cs, enc->meta, enc->metadata_size, NULL)) {
+          !si_vid_resize_buffer(enc->base.context, enc->meta, enc->metadata_size, NULL)) {
          RADEON_ENC_ERR("Can't resize meta buffer.\n");
          goto error;
       }
@@ -1709,7 +1707,7 @@ static void *radeon_vcn_enc_encode_headers(struct radeon_encoder *enc)
    if (!data)
       return NULL;
 
-   uint8_t *ptr = enc->ws->buffer_map(enc->ws, enc->bs_handle, &enc->cs,
+   uint8_t *ptr = enc->ws->buffer_map(enc->ws, enc->bs_handle, NULL,
                                       PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
    if (!ptr) {
       RADEON_ENC_ERR("Can't map bs buffer.\n");
@@ -1833,7 +1831,7 @@ static void radeon_enc_get_feedback(struct pipe_video_codec *encoder, void *feed
    struct radeon_encoder *enc = (struct radeon_encoder *)encoder;
    struct rvid_buffer *fb = feedback;
 
-   uint32_t *ptr = enc->ws->buffer_map(enc->ws, fb->res->buf, &enc->cs,
+   uint32_t *ptr = enc->ws->buffer_map(enc->ws, fb->res->buf, NULL,
                                        PIPE_MAP_READ_WRITE | RADEON_MAP_TEMPORARY);
    if (ptr[1])
       *size = ptr[6] - ptr[8];
@@ -2018,7 +2016,7 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
 
    if (!ws->cs_create(&enc->cs,
        (sctx->vcn_has_ctx) ? ((struct si_context *)enc->ectx)->ctx : sctx->ctx,
-       AMD_IP_VCN_ENC, radeon_enc_cs_flush, enc)) {
+       AMD_IP_VCN_ENC, NULL, NULL)) {
       RADEON_ENC_ERR("Can't get command submission context.\n");
       goto error;
    }
@@ -2120,6 +2118,21 @@ unsigned int radeon_enc_h2645_picture_type(enum pipe_h2645_enc_picture_type type
       return RENCODE_PICTURE_TYPE_P_SKIP;
    case PIPE_H2645_ENC_PICTURE_TYPE_B:
       return RENCODE_PICTURE_TYPE_B;
+   default:
+      assert(false);
+      return 0;
+   }
+}
+
+unsigned int radeon_enc_av1_picture_type(enum pipe_av1_enc_frame_type type)
+{
+   switch (type) {
+   case PIPE_AV1_ENC_FRAME_TYPE_KEY:
+   case PIPE_AV1_ENC_FRAME_TYPE_INTRA_ONLY:
+      return RENCODE_PICTURE_TYPE_I;
+   case PIPE_AV1_ENC_FRAME_TYPE_INTER:
+   case PIPE_AV1_ENC_FRAME_TYPE_SWITCH:
+      return RENCODE_PICTURE_TYPE_P;
    default:
       assert(false);
       return 0;

@@ -50,7 +50,6 @@
 #include "util/xmlconfig.h"
 
 #include "virtio/virtio-gpu/drm_hw.h"
-#include "virtio/virtio-gpu/virglrenderer_hw.h"
 #include "drm-uapi/virtgpu_drm.h"
 
 #define DRM_RENDER_NODE_DEV_NAME_FORMAT "%s/renderD%d"
@@ -88,6 +87,7 @@ static const struct drm_driver_descriptor *driver_descriptors[] = {
    &vc4_driver_descriptor,
    &panfrost_driver_descriptor,
    &panthor_driver_descriptor,
+   &asahi_driver_descriptor,
    &etnaviv_driver_descriptor,
    &tegra_driver_descriptor,
    &lima_driver_descriptor,
@@ -129,7 +129,7 @@ static int
 get_nctx_caps(int fd, struct virgl_renderer_capset_drm *caps)
 {
    struct drm_virtgpu_get_caps args = {
-         .cap_set_id = VIRGL_RENDERER_CAPSET_DRM,
+         .cap_set_id = VIRTGPU_DRM_CAPSET_DRM,
          .cap_set_ver = 0,
          .addr = (uintptr_t)caps,
          .size = sizeof(*caps),
@@ -331,6 +331,9 @@ pipe_loader_get_compatible_render_capable_device_fds(int kms_only_fd, unsigned i
    bool is_platform_device;
    struct pipe_loader_device *dev;
    const char * const drivers[] = {
+#if defined GALLIUM_ASAHI
+      "asahi",
+#endif
 #if defined GALLIUM_ETNAVIV
       "etnaviv",
 #endif

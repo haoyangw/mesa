@@ -499,7 +499,6 @@ iris_finalize_program(struct iris_compiled_shader *shader,
                       uint32_t *streamout,
                       uint32_t *system_values,
                       unsigned num_system_values,
-                      unsigned kernel_input_size,
                       unsigned num_cbufs,
                       const struct iris_binding_table *bt)
 {
@@ -513,7 +512,6 @@ iris_finalize_program(struct iris_compiled_shader *shader,
    shader->streamout = streamout;
    shader->system_values = system_values;
    shader->num_system_values = num_system_values;
-   shader->kernel_input_size = kernel_input_size;
    shader->num_cbufs = num_cbufs;
    shader->bt = *bt;
 
@@ -732,6 +730,7 @@ iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
                                             : ISL_FORMAT_R32G32B32A32_FLOAT,
                          .swizzle = ISL_SWIZZLE_IDENTITY,
                          .stride_B = 1,
+                         .usage = usage,
                          .mocs = iris_mocs(res->bo, &screen->isl_dev, usage));
 }
 
@@ -767,52 +766,42 @@ get_aoa_deref_offset(nir_builder *b,
    return nir_umin(b, offset, nir_imm_int(b, array_size - elem_size));
 }
 
+static bool
+iris_lower_storage_image_derefs_instr(nir_builder *b,
+                                      nir_intrinsic_instr *intrin,
+                                      UNUSED void *_)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+   case nir_intrinsic_image_deref_size:
+   case nir_intrinsic_image_deref_samples:
+   case nir_intrinsic_image_deref_load_raw_intel:
+   case nir_intrinsic_image_deref_store_raw_intel: {
+      nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+
+      b->cursor = nir_before_instr(&intrin->instr);
+      nir_def *index =
+         nir_iadd_imm(b, get_aoa_deref_offset(b, deref, 1),
+                      var->data.driver_location);
+      nir_rewrite_image_intrinsic(intrin, index, false);
+      return true;
+   }
+
+   default:
+      return false;
+   }
+}
+
 static void
 iris_lower_storage_image_derefs(nir_shader *nir)
 {
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-
-   nir_builder b = nir_builder_create(impl);
-   bool progress = false;
-
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-
-         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-         switch (intrin->intrinsic) {
-         case nir_intrinsic_image_deref_load:
-         case nir_intrinsic_image_deref_store:
-         case nir_intrinsic_image_deref_atomic:
-         case nir_intrinsic_image_deref_atomic_swap:
-         case nir_intrinsic_image_deref_size:
-         case nir_intrinsic_image_deref_samples:
-         case nir_intrinsic_image_deref_load_raw_intel:
-         case nir_intrinsic_image_deref_store_raw_intel: {
-            nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
-            nir_variable *var = nir_deref_instr_get_variable(deref);
-
-            b.cursor = nir_before_instr(&intrin->instr);
-            nir_def *index =
-               nir_iadd_imm(&b, get_aoa_deref_offset(&b, deref, 1),
-                                var->data.driver_location);
-            nir_rewrite_image_intrinsic(intrin, index, false);
-            progress = true;
-            break;
-         }
-
-         default:
-            break;
-         }
-      }
-   }
-
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
+   nir_shader_intrinsics_pass(nir, iris_lower_storage_image_derefs_instr,
+                              nir_metadata_control_flow,
+                              NULL);
 }
 
 static bool
@@ -869,9 +858,8 @@ iris_fix_edge_flags(nir_shader *nir)
    nir_fixup_deref_modes(nir);
 
    nir_foreach_function_impl(impl, nir) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow |
-                                  nir_metadata_live_defs |
-                                  nir_metadata_loop_analysis);
+      nir_progress(true, impl,
+                   nir_metadata_control_flow | nir_metadata_live_defs | nir_metadata_loop_analysis);
    }
 
    return true;
@@ -958,13 +946,10 @@ static void
 iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
                     void *mem_ctx,
                     nir_shader *nir,
-                    unsigned kernel_input_size,
                     uint32_t **out_system_values,
                     unsigned *out_num_system_values,
                     unsigned *out_num_cbufs)
 {
-   unsigned system_values_start = ALIGN(kernel_input_size, sizeof(uint32_t));
-
    const unsigned IRIS_MAX_SYSTEM_VALUES =
       PIPE_MAX_SHADER_IMAGES * ISL_IMAGE_PARAM_SIZE;
    unsigned *system_values =
@@ -1056,8 +1041,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             }
 
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                     ucp_idx[ucp] * sizeof(uint32_t));
+            offset = nir_imm_int(&b, ucp_idx[ucp] * sizeof(uint32_t));
             break;
          }
          case nir_intrinsic_load_patch_vertices_in:
@@ -1068,8 +1052,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
                BRW_PARAM_BUILTIN_PATCH_VERTICES_IN;
 
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                     patch_vert_idx * sizeof(uint32_t));
+            offset = nir_imm_int(&b, patch_vert_idx * sizeof(uint32_t));
             break;
          case nir_intrinsic_load_tess_level_outer_default:
             if (tess_outer_default_idx == -1) {
@@ -1083,8 +1066,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             }
 
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                 tess_outer_default_idx * sizeof(uint32_t));
+            offset = nir_imm_int(&b, tess_outer_default_idx * sizeof(uint32_t));
             break;
          case nir_intrinsic_load_tess_level_inner_default:
             if (tess_inner_default_idx == -1) {
@@ -1098,8 +1080,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             }
 
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                 tess_inner_default_idx * sizeof(uint32_t));
+            offset = nir_imm_int(&b, tess_inner_default_idx * sizeof(uint32_t));
             break;
          case nir_intrinsic_image_deref_load_param_intel: {
             assert(devinfo->ver < 9);
@@ -1140,7 +1121,6 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             b.cursor = nir_before_instr(instr);
             offset = nir_iadd_imm(&b,
                get_aoa_deref_offset(&b, deref, ISL_IMAGE_PARAM_SIZE * 4),
-               system_values_start +
                img_idx[var->data.binding] * 4 +
                nir_intrinsic_base(intrin) * 16);
             break;
@@ -1157,8 +1137,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             }
 
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                     variable_group_size_idx * sizeof(uint32_t));
+            offset = nir_imm_int(&b, variable_group_size_idx * sizeof(uint32_t));
             break;
          }
          case nir_intrinsic_load_work_dim: {
@@ -1167,13 +1146,10 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
                system_values[work_dim_idx] = BRW_PARAM_BUILTIN_WORK_DIM;
             }
             b.cursor = nir_before_instr(instr);
-            offset = nir_imm_int(&b, system_values_start +
-                                     work_dim_idx * sizeof(uint32_t));
+            offset = nir_imm_int(&b, work_dim_idx * sizeof(uint32_t));
             break;
          }
          case nir_intrinsic_load_kernel_input: {
-            assert(nir_intrinsic_base(intrin) +
-                   nir_intrinsic_range(intrin) <= kernel_input_size);
             b.cursor = nir_before_instr(instr);
             offset = nir_iadd_imm(&b, intrin->src[0].ssa,
                                       nir_intrinsic_base(intrin));
@@ -1208,7 +1184,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
       num_cbufs++;
 
    /* Place the new params in a new cbuf. */
-   if (num_system_values > 0 || kernel_input_size > 0) {
+   if (num_system_values > 0) {
       unsigned sysval_cbuf_index = num_cbufs;
       num_cbufs++;
 
@@ -1889,7 +1865,7 @@ iris_compile_vs(struct iris_screen *screen,
       }
    }
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
+   iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
@@ -1983,7 +1959,7 @@ iris_compile_vs(struct iris_screen *screen,
                                        &iris_vue_data(shader)->vue_map);
 
    iris_finalize_program(shader, so_decls,
-                         system_values, num_system_values, 0, num_cbufs, &bt);
+                         system_values, num_system_values, num_cbufs, &bt);
 
    iris_upload_shader(screen, ish, shader, NULL, uploader, IRIS_CACHE_VS,
                       sizeof(*key), key, program);
@@ -2129,7 +2105,7 @@ iris_compile_tcs(struct iris_screen *screen,
       source_hash = *(uint32_t*)nir->info.source_blake3;
    }
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
+   iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
    iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
@@ -2202,7 +2178,7 @@ iris_compile_tcs(struct iris_screen *screen,
    shader->compilation_failed = false;
 
    iris_finalize_program(shader, NULL, system_values,
-                         num_system_values, 0, num_cbufs, &bt);
+                         num_system_values, num_cbufs, &bt);
 
    iris_upload_shader(screen, ish, shader, passthrough_ht, uploader,
                       IRIS_CACHE_TCS, sizeof(*key), key, program);
@@ -2321,7 +2297,7 @@ iris_compile_tes(struct iris_screen *screen,
       nir_shader_gather_info(nir, impl);
    }
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
+   iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
@@ -2416,7 +2392,7 @@ iris_compile_tes(struct iris_screen *screen,
                                        &iris_vue_data(shader)->vue_map);
 
    iris_finalize_program(shader, so_decls, system_values,
-                         num_system_values, 0, num_cbufs, &bt);
+                         num_system_values, num_cbufs, &bt);
 
    iris_upload_shader(screen, ish, shader, NULL, uploader, IRIS_CACHE_TES,
                       sizeof(*key), key, program);
@@ -2507,7 +2483,7 @@ iris_compile_gs(struct iris_screen *screen,
       nir_shader_gather_info(nir, impl);
    }
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
+   iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
@@ -2597,7 +2573,7 @@ iris_compile_gs(struct iris_screen *screen,
                                        &iris_vue_data(shader)->vue_map);
 
    iris_finalize_program(shader, so_decls, system_values,
-                         num_system_values, 0, num_cbufs, &bt);
+                         num_system_values, num_cbufs, &bt);
 
    iris_upload_shader(screen, ish, shader, NULL, uploader, IRIS_CACHE_GS,
                       sizeof(*key), key, program);
@@ -2675,7 +2651,7 @@ iris_compile_fs(struct iris_screen *screen,
    nir_shader *nir = nir_shader_clone(mem_ctx, ish->nir);
    const struct iris_fs_prog_key *const key = &shader->key.fs;
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, 0, &system_values,
+   iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
 
    /* Lower output variables to load_output intrinsics before setting up
@@ -2686,7 +2662,6 @@ iris_compile_fs(struct iris_screen *screen,
    brw_nir_lower_fs_outputs(nir);
 
    int null_rts = brw_nir_fs_needs_null_rt(devinfo, nir,
-                                           key->multisample_fbo,
                                            key->alpha_to_coverage) ? 1 : 0;
 
    struct iris_binding_table bt;
@@ -2778,7 +2753,7 @@ iris_compile_fs(struct iris_screen *screen,
    shader->compilation_failed = false;
 
    iris_finalize_program(shader, NULL, system_values,
-                         num_system_values, 0, num_cbufs, &bt);
+                         num_system_values, num_cbufs, &bt);
 
    iris_upload_shader(screen, ish, shader, NULL, uploader, IRIS_CACHE_FS,
                       sizeof(*key), key, program);
@@ -3025,7 +3000,7 @@ iris_compile_cs(struct iris_screen *screen,
       unreachable("no elk support");
 #endif
 
-   iris_setup_uniforms(devinfo, mem_ctx, nir, ish->kernel_input_size,
+   iris_setup_uniforms(devinfo, mem_ctx, nir,
                        &system_values, &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
@@ -3099,7 +3074,7 @@ iris_compile_cs(struct iris_screen *screen,
    shader->compilation_failed = false;
 
    iris_finalize_program(shader, NULL, system_values,
-                         num_system_values, ish->kernel_input_size, num_cbufs,
+                         num_system_values, num_cbufs,
                          &bt);
 
    iris_upload_shader(screen, ish, shader, NULL, uploader, IRIS_CACHE_CS,
@@ -3235,6 +3210,7 @@ iris_get_scratch_surf(struct iris_context *ice,
                          .size_B = scratch_bo->size,
                          .format = ISL_FORMAT_RAW,
                          .swizzle = ISL_SWIZZLE_IDENTITY,
+                         .usage = 0,
                          .mocs = iris_mocs(scratch_bo, &screen->isl_dev, 0),
                          .stride_B = per_thread_scratch,
                          .is_scratch = true);
@@ -3323,7 +3299,6 @@ iris_create_compute_state(struct pipe_context *ctx,
 
    struct iris_uncompiled_shader *ish =
       iris_create_uncompiled_shader(screen, nir, NULL);
-   ish->kernel_input_size = state->req_input_mem;
    ish->kernel_shared_size = state->static_shared_mem;
 
    // XXX: disallow more than 64KB of shared variables

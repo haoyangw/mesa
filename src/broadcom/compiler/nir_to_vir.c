@@ -660,7 +660,7 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                         uint32_t perquad =
                                 is_load && !vir_in_nonuniform_control_flow(c) &&
                                 ((c->s->info.stage == MESA_SHADER_FRAGMENT &&
-                                  c->s->info.fs.needs_quad_helper_invocations &&
+                                  c->s->info.fs.needs_coarse_quad_helper_invocations &&
                                   !c->emitted_discard) ||
                                  c->s->info.uses_wide_subgroup_intrinsics) ?
                                 GENERAL_TMU_LOOKUP_PER_QUAD :
@@ -1167,7 +1167,7 @@ ntq_emit_comparison(struct v3d_compile *c,
                     enum v3d_qpu_cond *out_cond)
 {
         struct qreg src0 = ntq_get_alu_src(c, compare_instr, 0);
-        struct qreg src1;
+        struct qreg src1 = { 0 };
         if (nir_op_infos[compare_instr->op].num_inputs > 1)
                 src1 = ntq_get_alu_src(c, compare_instr, 1);
         bool cond_invert = false;
@@ -1375,7 +1375,8 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         }
 
         /* General case: We can just grab the one used channel per src. */
-        struct qreg src[nir_op_infos[instr->op].num_inputs];
+        assert(nir_op_infos[instr->op].num_inputs <= 3);
+        struct qreg src[3] = { 0 };
         for (int i = 0; i < nir_op_infos[instr->op].num_inputs; i++) {
                 src[i] = ntq_get_alu_src(c, instr, i);
         }
@@ -2163,8 +2164,18 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                 NIR_PASS(progress, s, nir_opt_cse);
                 /* before peephole_select as it can generate 64 bit bcsels */
                 NIR_PASS(progress, s, nir_lower_64bit_phis);
-                NIR_PASS(progress, s, nir_opt_peephole_select, 0, false, false);
-                NIR_PASS(progress, s, nir_opt_peephole_select, 24, true, true);
+
+                nir_opt_peephole_select_options peephole_select_options = {
+                        .limit = 0,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
+
+                peephole_select_options = (nir_opt_peephole_select_options){
+                        .limit = 24,
+                        .indirect_load_ok = true,
+                        .expensive_alu_ok = true,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
                 NIR_PASS(progress, s, nir_opt_algebraic);
                 NIR_PASS(progress, s, nir_opt_constant_folding);
 
@@ -2178,7 +2189,11 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                    NIR_PASS(progress, s, nir_opt_dce);
                 }
 
-                NIR_PASS(progress, s, nir_opt_conditional_discard);
+                peephole_select_options = (nir_opt_peephole_select_options){
+                        .limit = 0,
+                        .discard_ok = true,
+                };
+                NIR_PASS(progress, s, nir_opt_peephole_select, &peephole_select_options);
 
                 NIR_PASS(progress, s, nir_opt_remove_phis);
                 NIR_PASS(progress, s, nir_opt_if, false);

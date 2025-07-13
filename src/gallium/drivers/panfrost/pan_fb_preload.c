@@ -1133,7 +1133,8 @@ pan_preload_emit_dcd(struct pan_fb_preload_cache *cache, struct pan_pool *pool,
    }
 #else
    struct panfrost_ptr T;
-   unsigned nr_tables = PAN_BLIT_NUM_RESOURCE_TABLES;
+   unsigned nr_tables = ALIGN_POT(PAN_BLIT_NUM_RESOURCE_TABLES,
+                                  MALI_RESOURCE_TABLE_SIZE_ALIGNMENT);
 
    /* Although individual resources need only 16 byte alignment, the
     * resource table as a whole must be 64-byte aligned.
@@ -1185,30 +1186,37 @@ pan_preload_emit_dcd(struct pan_fb_preload_cache *cache, struct pan_pool *pool,
    pan_pack(out, DRAW, cfg) {
       if (zs) {
          /* ZS_EMIT requires late update/kill */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
          cfg.blend_count = 0;
       } else {
          /* Skipping ATEST requires forcing Z/S */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
 
          cfg.blend = blend.gpu;
          cfg.blend_count = bd_count;
-         cfg.render_target_mask = 0x1;
+         cfg.flags_1.render_target_mask = 0x1;
       }
 
-      cfg.allow_forward_pixel_to_kill = !zs;
-      cfg.allow_forward_pixel_to_be_killed = true;
+      cfg.flags_0.allow_forward_pixel_to_kill = !zs;
+      cfg.flags_0.allow_forward_pixel_to_be_killed = true;
       cfg.depth_stencil = pan_preload_emit_zs(pool, z, s);
-      cfg.sample_mask = 0xFFFF;
-      cfg.multisample_enable = ms;
-      cfg.evaluate_per_sample = ms;
+      cfg.flags_1.sample_mask = 0xFFFF;
+      cfg.flags_0.multisample_enable = ms;
+      cfg.flags_0.evaluate_per_sample = ms;
+      cfg.flags_0.clean_fragment_write = clean_fragment_write;
+
+#if PAN_ARCH >= 12
+      cfg.fragment_resources = T.gpu | nr_tables;
+      cfg.fragment_shader = spd.gpu;
+      cfg.thread_storage = tsd;
+#else
       cfg.maximum_z = 1.0;
-      cfg.clean_fragment_write = clean_fragment_write;
       cfg.shader.resources = T.gpu | nr_tables;
       cfg.shader.shader = spd.gpu;
       cfg.shader.thread_storage = tsd;
+#endif
    }
 #endif
 }
@@ -1264,7 +1272,15 @@ pan_preload_emit_pre_frame_dcd(struct pan_fb_preload_cache *cache,
       enum pipe_format fmt = fb->zs.view.zs
                                 ? fb->zs.view.zs->planes[0]->layout.format
                                 : fb->zs.view.s->planes[0]->layout.format;
-      bool always = false;
+      /* On some GPUs (e.g. G31), we must use SHADER_MODE_ALWAYS rather than
+       * SHADER_MODE_INTERSECT for full screen operations. Since the full
+       * screen rectangle will always intersect, this won't affect
+       * performance. The UNUSED tag is because some PAN_ARCH variants do not
+       * need this test.
+       */
+      UNUSED bool always = !fb->extent.minx && !fb->extent.miny &&
+                           fb->extent.maxx == (fb->width - 1) &&
+                           fb->extent.maxy == (fb->height - 1);
 
       /* If we're dealing with a combined ZS resource and only one
        * component is cleared, we need to reload the whole surface
@@ -1275,19 +1291,38 @@ pan_preload_emit_pre_frame_dcd(struct pan_fb_preload_cache *cache,
           fb->zs.clear.z != fb->zs.clear.s)
          always = true;
 
-      /* We could use INTERSECT on Bifrost v7 too, but
+      /* We could use INTERSECT on Bifrost v7-v12 too, but
        * EARLY_ZS_ALWAYS has the advantage of reloading the ZS tile
        * buffer one or more tiles ahead, making ZS data immediately
        * available for any ZS tests taking place in other shaders.
        * Thing's haven't been benchmarked to determine what's
        * preferable (saving bandwidth vs having ZS preloaded
        * earlier), so let's leave it like that for now.
+       *
+       * On v13+, we don't have EARLY_ZS_ALWAYS instead we use
+       * PREPASS_ALWAYS / PREPASS_INTERSECT.
        */
+#if PAN_ARCH >= 13
       fb->bifrost.pre_post.modes[dcd_idx] =
-         PAN_ARCH > 6
-            ? MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS
-         : always ? MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS
-                  : MALI_PRE_POST_FRAME_SHADER_MODE_INTERSECT;
+         always ? MALI_PRE_POST_FRAME_SHADER_MODE_PREPASS_ALWAYS
+                : MALI_PRE_POST_FRAME_SHADER_MODE_PREPASS_INTERSECT;
+#elif PAN_ARCH > 7 && PAN_ARCH <= 12
+      fb->bifrost.pre_post.modes[dcd_idx] =
+         MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS;
+#else
+      /* EARLY_ZS_ALWAYS was introduced in 7.2, so we have to check the
+       * GPU id to find if it's supported, not just PAN_ARCH.
+       * The PAN_ARCH check is redundant but allows the compiler to optimize
+       * when PAN_ARCH < 7.
+       */
+      if (PAN_ARCH >= 7 && cache->gpu_id >= 0x7200)
+         fb->bifrost.pre_post.modes[dcd_idx] =
+            MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS;
+      else
+         fb->bifrost.pre_post.modes[dcd_idx] =
+            always ? MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS
+                   : MALI_PRE_POST_FRAME_SHADER_MODE_INTERSECT;
+#endif
    } else {
       fb->bifrost.pre_post.modes[dcd_idx] =
          always_write ? MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS
@@ -1315,7 +1350,7 @@ pan_preload_emit_tiler_job(struct pan_fb_preload_cache *cache, struct pan_pool *
    }
 
    pan_section_pack(job.cpu, TILER_JOB, PRIMITIVE_SIZE, cfg) {
-      cfg.constant = 1.0f;
+      cfg.fixed_sized = 1.0f;
    }
 
    void *invoc = pan_section_ptr(job.cpu, TILER_JOB, INVOCATION);

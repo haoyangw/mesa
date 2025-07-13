@@ -85,12 +85,9 @@ enum radeon_value_id {
 };
 
 struct radeon_cmdbuf {
-   /* These are uint64_t to tell the compiler that buf can't alias them.
-    * If they're uint32_t the generated code needs to redundantly
-    * store and reload them between buf writes. */
-   uint64_t cdw;         /* Number of used dwords. */
-   uint64_t max_dw;      /* Maximum number of dwords. */
-   uint64_t reserved_dw; /* Number of dwords reserved through radeon_check_space() */
+   uint32_t cdw;         /* Number of used dwords. */
+   uint32_t max_dw;      /* Maximum number of dwords. */
+   uint32_t reserved_dw; /* Number of dwords reserved through radeon_check_space() */
    uint32_t *buf;        /* The base pointer of the chunk. */
 };
 
@@ -177,6 +174,7 @@ struct radeon_winsys_bo {
    bool use_global_list;
    bool gfx12_allow_dcc;
    enum radeon_bo_domain initial_domain;
+   uint64_t obj_id;
 };
 
 struct radv_winsys_submit_info {
@@ -319,28 +317,6 @@ struct radeon_winsys {
 
    const struct vk_sync_type *const *(*get_sync_types)(struct radeon_winsys *ws);
 };
-
-static inline void
-radeon_emit(struct radeon_cmdbuf *cs, uint32_t value)
-{
-   assert(cs->cdw < cs->reserved_dw);
-   cs->buf[cs->cdw++] = value;
-}
-
-static inline void
-radeon_emit_direct(struct radeon_cmdbuf *cs, uint32_t offset, uint32_t value)
-{
-   assert(offset < cs->reserved_dw);
-   cs->buf[offset] = value;
-}
-
-static inline void
-radeon_emit_array(struct radeon_cmdbuf *cs, const uint32_t *values, unsigned count)
-{
-   assert(cs->cdw + count <= cs->reserved_dw);
-   memcpy(cs->buf + cs->cdw, values, count * 4);
-   cs->cdw += count;
-}
 
 static inline uint64_t
 radv_buffer_get_va(const struct radeon_winsys_bo *bo)

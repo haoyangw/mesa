@@ -146,12 +146,22 @@ nouveau_zink_predicate(int fd, const char *driver)
 
    bool prefer_zink = false;
 
-   /* enable this once zink is up to speed.
-    * struct drm_nouveau_getparam r = { .param = NOUVEAU_GETPARAM_CHIPSET_ID };
-    * int ret = drmCommandWriteRead(fd, DRM_NOUVEAU_GETPARAM, &r, sizeof(r));
-    * if (ret == 0 && (r.value & ~0xf) >= 0x160)
-    *    prefer_zink = true;
+   /* Enable Zink by default on Turing and later GPUs
+    *
+    * We only use Zink if if the kernel supports VMA_TILEMODE, which is needed
+    * for DRM format modifiers.  This also doubles as a check for a new enough
+    * kernel to run NVK in general.
     */
+   struct drm_nouveau_getparam r = { .param = NOUVEAU_GETPARAM_HAS_VMA_TILEMODE };
+   int ret = drmCommandWriteRead(fd, DRM_NOUVEAU_GETPARAM, &r, sizeof(r));
+   if (ret == 0 && r.value == 1) {
+      r.param = NOUVEAU_GETPARAM_CHIPSET_ID;
+      r.value = 0;
+      ret = drmCommandWriteRead(fd, DRM_NOUVEAU_GETPARAM, &r, sizeof(r));
+      if (ret == 0 && r.value >= 0x160) {
+         prefer_zink = true;
+      }
+   }
 
    prefer_zink = debug_get_bool_option("NOUVEAU_USE_ZINK", prefer_zink);
 
@@ -846,18 +856,13 @@ loader_open_driver_lib(const char *driver_name,
          next = end;
 
       len = next - p;
-      snprintf(path, sizeof(path), "%.*s/tls/%s%s.so", len,
+      snprintf(path, sizeof(path), "%.*s/%s%s.so", len,
                p, driver_name, lib_suffix);
       driver = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
       if (driver == NULL) {
-         snprintf(path, sizeof(path), "%.*s/%s%s.so", len,
-                  p, driver_name, lib_suffix);
-         driver = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-         if (driver == NULL) {
-            dl_error = dlerror();
-            log_(_LOADER_DEBUG, "MESA-LOADER: failed to open %s: %s\n",
-                 path, dl_error);
-         }
+         dl_error = dlerror();
+         log_(_LOADER_DEBUG, "MESA-LOADER: failed to open %s: %s\n",
+              path, dl_error);
       }
       /* not need continue to loop all paths once the driver is found */
       if (driver != NULL)

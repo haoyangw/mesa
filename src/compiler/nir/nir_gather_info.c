@@ -88,7 +88,7 @@ get_deref_info(nir_shader *shader, nir_variable *var, nir_deref_instr *deref,
             *indirect |= !nir_src_is_const((*p)->arr.index);
          } else if ((*p)->deref_type == nir_deref_type_struct) {
             /* Struct indices are always constant. */
-         }  else if ((*p)->deref_type == nir_deref_type_array_wildcard) {
+         } else if ((*p)->deref_type == nir_deref_type_array_wildcard) {
             /* Wilcards ref the whole array dimension and should get lowered
              * to direct deref at a later point.
              */
@@ -459,7 +459,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
             case VARYING_SLOT_TESS_LEVEL_OUTER:
                num_slots = DIV_ROUND_UP(num_slots, 4);
                break;
-            default: break;
+            default:
+               break;
             }
          }
          slot_mask = BITFIELD64_RANGE(semantics.location, num_slots);
@@ -722,6 +723,10 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
                  nir_system_value_from_intrinsic(instr->intrinsic));
       break;
 
+   case nir_intrinsic_is_helper_invocation:
+      BITSET_SET(shader->info.system_values_read, SYSTEM_VALUE_HELPER_INVOCATION);
+      break;
+
    case nir_intrinsic_load_barycentric_pixel:
       if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_SMOOTH ||
           nir_intrinsic_interp_mode(instr) == INTERP_MODE_NONE) {
@@ -768,53 +773,6 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       } else if (nir_intrinsic_interp_mode(instr) == INTERP_MODE_NOPERSPECTIVE) {
          BITSET_SET(shader->info.system_values_read, SYSTEM_VALUE_BARYCENTRIC_LINEAR_COORD);
       }
-      break;
-
-   case nir_intrinsic_ddx:
-   case nir_intrinsic_ddx_fine:
-   case nir_intrinsic_ddx_coarse:
-   case nir_intrinsic_ddy:
-   case nir_intrinsic_ddy_fine:
-   case nir_intrinsic_ddy_coarse:
-      if (shader->info.stage == MESA_SHADER_FRAGMENT)
-         shader->info.fs.needs_quad_helper_invocations = true;
-      break;
-
-   case nir_intrinsic_quad_vote_any:
-   case nir_intrinsic_quad_vote_all:
-   case nir_intrinsic_quad_broadcast:
-   case nir_intrinsic_quad_swap_horizontal:
-   case nir_intrinsic_quad_swap_vertical:
-   case nir_intrinsic_quad_swap_diagonal:
-   case nir_intrinsic_quad_swizzle_amd:
-      if (shader->info.stage == MESA_SHADER_FRAGMENT)
-         shader->info.fs.needs_quad_helper_invocations = true;
-      break;
-
-   case nir_intrinsic_vote_any:
-   case nir_intrinsic_vote_all:
-   case nir_intrinsic_vote_feq:
-   case nir_intrinsic_vote_ieq:
-   case nir_intrinsic_ballot:
-   case nir_intrinsic_first_invocation:
-   case nir_intrinsic_last_invocation:
-   case nir_intrinsic_read_invocation:
-   case nir_intrinsic_read_first_invocation:
-   case nir_intrinsic_elect:
-   case nir_intrinsic_reduce:
-   case nir_intrinsic_inclusive_scan:
-   case nir_intrinsic_exclusive_scan:
-   case nir_intrinsic_shuffle:
-   case nir_intrinsic_shuffle_xor:
-   case nir_intrinsic_shuffle_up:
-   case nir_intrinsic_shuffle_down:
-   case nir_intrinsic_rotate:
-   case nir_intrinsic_masked_swizzle_amd:
-      shader->info.uses_wide_subgroup_intrinsics = true;
-
-      if (shader->info.stage == MESA_SHADER_FRAGMENT &&
-          shader->info.fs.require_full_quads)
-         shader->info.fs.needs_quad_helper_invocations = true;
       break;
 
    case nir_intrinsic_end_primitive:
@@ -868,6 +826,29 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       if (nir_intrinsic_writes_external_memory(instr))
          shader->info.writes_memory = true;
 
+      if (nir_intrinsic_has_semantic(instr, NIR_INTRINSIC_QUADGROUP)) {
+         if (shader->info.stage == MESA_SHADER_FRAGMENT) {
+            shader->info.fs.needs_coarse_quad_helper_invocations = true;
+            /* For now assume that plain ddx/ddy are always coarse. This is
+             * true for most backends.
+             * TODO: Switch ddx to ddx_coarse for remaining backends.
+             */
+            if (instr->intrinsic != nir_intrinsic_ddx &&
+                instr->intrinsic != nir_intrinsic_ddy &&
+                instr->intrinsic != nir_intrinsic_ddx_coarse &&
+                instr->intrinsic != nir_intrinsic_ddy_coarse)
+               shader->info.fs.needs_full_quad_helper_invocations = true;
+         }
+      } else if (nir_intrinsic_has_semantic(instr, NIR_INTRINSIC_SUBGROUP)) {
+         shader->info.uses_wide_subgroup_intrinsics = true;
+
+         if (shader->info.stage == MESA_SHADER_FRAGMENT &&
+             shader->info.fs.require_full_quads) {
+            shader->info.fs.needs_coarse_quad_helper_invocations = true;
+            shader->info.fs.needs_full_quad_helper_invocations = true;
+         }
+      }
+
       if (instr->intrinsic == nir_intrinsic_image_levels ||
           instr->intrinsic == nir_intrinsic_image_size ||
           instr->intrinsic == nir_intrinsic_image_samples ||
@@ -885,9 +866,13 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 static void
 gather_tex_info(nir_tex_instr *instr, nir_shader *shader)
 {
+   /* For now we assume that implicit derivatives use coarse derivatives.
+    * Drivers that need to assume otherwise might have to plumb through a
+    * property.
+    */
    if (shader->info.stage == MESA_SHADER_FRAGMENT &&
        nir_tex_instr_has_implicit_derivative(instr))
-      shader->info.fs.needs_quad_helper_invocations = true;
+      shader->info.fs.needs_coarse_quad_helper_invocations = true;
 
    if (nir_tex_instr_src_index(instr, nir_tex_src_texture_handle) != -1 ||
        nir_tex_instr_src_index(instr, nir_tex_src_sampler_handle) != -1)
@@ -1028,7 +1013,8 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
       shader->info.fs.uses_discard = false;
       shader->info.fs.color_is_dual_source = false;
       shader->info.fs.uses_fbfetch_output = false;
-      shader->info.fs.needs_quad_helper_invocations = false;
+      shader->info.fs.needs_coarse_quad_helper_invocations = false;
+      shader->info.fs.needs_full_quad_helper_invocations = false;
    }
    if (shader->info.stage == MESA_SHADER_TESS_CTRL) {
       shader->info.tess.tcs_same_invocation_inputs_read = 0;

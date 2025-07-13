@@ -29,7 +29,7 @@ ail_initialize_linear(struct ail_layout *layout)
  * Get the maximum tile size possible for a given block size. This satisfy
  * width * height * blocksize = 16384 = page size, so each tile is one page.
  */
-static inline struct ail_tile
+struct ail_tile
 ail_get_max_tile_size(unsigned blocksize_B)
 {
    /* clang-format off */
@@ -175,6 +175,17 @@ ail_initialize_twiddled(struct ail_layout *layout)
    assert(layout->levels < ARRAY_SIZE(layout->level_offsets_B));
    layout->level_offsets_B[layout->levels] = offset_B;
 
+   /* Determine the start of the miptail. From that level on, we can no longer
+    * precisely bind at page granularity.
+    */
+   layout->mip_tail_first_lod = MIN2(pot_level, layout->levels);
+
+   /* Determine the stride of the miptail. Sparse arrayed images inherently
+    * require page-aligned layers to be able to bind individual layers.
+    */
+   unsigned tail_offset_B = layout->level_offsets_B[layout->mip_tail_first_lod];
+   layout->mip_tail_stride = align(offset_B - tail_offset_B, AIL_PAGESIZE);
+
    /* Align layer size if we have mipmaps and one miptree is larger than one
     * page */
    layout->page_aligned_layers = layout->levels != 1 && offset_B > AIL_PAGESIZE;
@@ -248,6 +259,16 @@ ail_initialize_compression(struct ail_layout *layout)
       (uint64_t)(layout->compression_layer_stride_B * layout->depth_px);
 }
 
+static void
+ail_initialize_sparse_table(struct ail_layout *layout)
+{
+   layout->sparse_folios_per_layer =
+      DIV_ROUND_UP(layout->layer_stride_B, AIL_IMAGE_SIZE_PER_FOLIO_B);
+
+   unsigned folios = layout->sparse_folios_per_layer * layout->depth_px;
+   layout->sparse_table_size_B = folios * AIL_FOLIO_SIZE_B;
+}
+
 void
 ail_make_miptree(struct ail_layout *layout)
 {
@@ -269,8 +290,7 @@ ail_make_miptree(struct ail_layout *layout)
       assert(layout->sample_count_sa >= 1 && "Invalid sample count");
    }
 
-   assert(!(layout->writeable_image &&
-            layout->tiling == AIL_TILING_TWIDDLED_COMPRESSED) &&
+   assert(!(layout->writeable_image && layout->compressed) &&
           "Writeable images must not be compressed");
 
    /* Hardware strides are based on the maximum number of levels, so always
@@ -292,16 +312,18 @@ ail_make_miptree(struct ail_layout *layout)
    case AIL_TILING_LINEAR:
       ail_initialize_linear(layout);
       break;
-   case AIL_TILING_TWIDDLED:
+   case AIL_TILING_GPU:
       ail_initialize_twiddled(layout);
-      break;
-   case AIL_TILING_TWIDDLED_COMPRESSED:
-      ail_initialize_twiddled(layout);
-      ail_initialize_compression(layout);
       break;
    default:
       unreachable("Unsupported tiling");
    }
+
+   if (layout->compressed) {
+      ail_initialize_compression(layout);
+   }
+
+   ail_initialize_sparse_table(layout);
 
    layout->size_B = ALIGN_POT(layout->size_B, AIL_CACHELINE);
    assert(layout->size_B > 0 && "Invalid dimensions");

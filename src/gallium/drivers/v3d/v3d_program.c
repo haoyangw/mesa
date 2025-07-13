@@ -307,12 +307,8 @@ lower_uniform_offset_to_bytes_cb(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static bool
-lower_textures_cb(nir_builder *b, nir_instr *instr, void *_state)
+lower_textures_cb(nir_builder *b, nir_tex_instr *tex, void *_state)
 {
-        if (instr->type != nir_instr_type_tex)
-                return false;
-
-        nir_tex_instr *tex = nir_instr_as_tex(instr);
         if (nir_tex_instr_need_sampler(tex))
                 return false;
 
@@ -334,8 +330,8 @@ v3d_nir_lower_uniform_offset_to_bytes(nir_shader *s)
 static bool
 v3d_nir_lower_textures(nir_shader *s)
 {
-        return nir_shader_instructions_pass(s, lower_textures_cb,
-                                            nir_metadata_control_flow, NULL);
+        return nir_shader_tex_pass(s, lower_textures_cb,
+                                   nir_metadata_control_flow, NULL);
 }
 
 static void *
@@ -679,6 +675,7 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
 
         key->swap_color_rb = v3d->swap_color_rb;
         key->can_earlyz_with_discard = s->info.fs.uses_discard &&
+                !s->info.fs.uses_fbfetch_output &&
                 (!v3d->zsa || !job->zsbuf || !v3d->zsa->base.depth_enabled ||
                  !v3d->zsa->base.depth_writemask) &&
                 !(v3d->active_queries && v3d->current_oq);
@@ -694,11 +691,13 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
                  */
                 key->cbufs |= 1 << i;
 
-                /* If logic operations are enabled then we might emit color
-                 * reads and we need to know the color buffer format and
-                 * swizzle for that.
+                /* When emitting color reads (in the case of logic ops and
+                 * load_output) we need to know the color buffer format and
+                 * swizzle.
                  */
-                if (key->logicop_func != PIPE_LOGICOP_COPY) {
+                if (key->logicop_func != PIPE_LOGICOP_COPY ||
+                    s->info.fs.uses_fbfetch_output) {
+
                         key->color_fmt[i].format = cbuf->format;
                         memcpy(key->color_fmt[i].swizzle,
                                v3d_get_format_swizzle(&v3d->screen->devinfo,

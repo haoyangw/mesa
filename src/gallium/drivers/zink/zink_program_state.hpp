@@ -19,7 +19,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- * 
+ *
  * Authors:
  *    Mike Blumenkrantz <michael.blumenkrantz@gmail.com>
  */
@@ -34,6 +34,9 @@
 #include "zink_pipeline.h"
 #include "zink_program.h"
 #include "zink_screen.h"
+
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 /* runtime-optimized pipeline state hashing */
 template <zink_dynamic_state DYNAMIC_STATE>
@@ -163,7 +166,6 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
    state->modules_changed = false;
    state->uses_dynamic_stride = uses_dynamic_stride;
    state->idx = idx;
-   ctx->vertex_state_changed = false;
 
    const int rp_idx = state->render_pass ? 1 : 0;
    /* shortcut for reusing previous pipeline across program changes */

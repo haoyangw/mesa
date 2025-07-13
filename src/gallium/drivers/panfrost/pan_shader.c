@@ -32,10 +32,12 @@
 #include "nir/tgsi_to_nir.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
+#include "util/perf/cpu_trace.h"
 #include "nir_builder.h"
 #include "nir_serialize.h"
 #include "pan_bo.h"
 #include "pan_context.h"
+#include "shader_enums.h"
 
 static struct panfrost_uncompiled_shader *
 panfrost_alloc_shader(const nir_shader *nir)
@@ -114,6 +116,8 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
                         unsigned fixed_varying_mask,
                         struct panfrost_shader_binary *out)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_device *dev = pan_device(&screen->base);
 
    nir_shader *s = nir_shader_clone(NULL, ir);
@@ -128,7 +132,6 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
       pan_shader_preprocess(s, panfrost_device_gpu_id(dev));
 
    struct panfrost_compile_inputs inputs = {
-      .debug = dbg,
       .gpu_id = panfrost_device_gpu_id(dev),
    };
 
@@ -212,6 +215,14 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
    NIR_PASS(_, s, panfrost_nir_lower_res_indices, &inputs);
 
    screen->vtbl.compile_shader(s, &inputs, &out->binary, &out->info);
+
+   panfrost_stats_util_debug(dbg, gl_shader_stage_name(s->info.stage),
+                             &out->info.stats);
+
+   if (s->info.stage == MESA_SHADER_VERTEX && out->info.vs.idvs) {
+      panfrost_stats_util_debug(dbg, "MESA_SHADER_POSITION",
+                                &out->info.stats_idvs_varying);
+   }
 
    assert(req_local_mem >= out->info.wls_size);
    out->info.wls_size = req_local_mem;
@@ -358,6 +369,7 @@ panfrost_new_variant_locked(struct panfrost_context *ctx,
                             struct panfrost_uncompiled_shader *uncompiled,
                             struct panfrost_shader_key *key)
 {
+   struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct panfrost_compiled_shader *prog = panfrost_alloc_variant(uncompiled);
 
    *prog = (struct panfrost_compiled_shader){
@@ -368,7 +380,7 @@ panfrost_new_variant_locked(struct panfrost_context *ctx,
    panfrost_shader_get(ctx->base.screen, &ctx->shaders, &ctx->descs, uncompiled,
                        &ctx->base.debug, prog, 0);
 
-   prog->earlyzs = pan_earlyzs_analyze(&prog->info);
+   prog->earlyzs = pan_earlyzs_analyze(&prog->info, dev->arch);
 
    return prog;
 }
@@ -454,6 +466,8 @@ static void *
 panfrost_create_shader_state(struct pipe_context *pctx,
                              const struct pipe_shader_state *cso)
 {
+   MESA_TRACE_FUNC();
+
    nir_shader *nir = (cso->type == PIPE_SHADER_IR_TGSI)
                         ? tgsi_to_nir(cso->tokens, pctx->screen, false)
                         : cso->ir.nir;

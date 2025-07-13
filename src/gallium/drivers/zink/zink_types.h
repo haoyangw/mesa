@@ -19,7 +19,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- * 
+ *
  * Authors:
  *    Mike Blumenkrantz <michael.blumenkrantz@gmail.com>
  */
@@ -29,7 +29,8 @@
 
 #include <vulkan/vulkan_core.h>
 
-#include "compiler/nir/nir.h"
+#include "compiler/nir/nir_defines.h"
+#include "compiler/nir/nir_shader_compiler_options.h"
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
@@ -38,6 +39,7 @@
 #include "pipebuffer/pb_cache.h"
 #include "pipebuffer/pb_slab.h"
 
+#include "util/blob.h"
 #include "util/disk_cache.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -100,15 +102,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
- 
+
 extern uint32_t zink_debug;
 extern bool zink_tracing;
- 
+
 #ifdef __cplusplus
 }
 #endif
 
- 
+
 /** enums */
 
 /* features for draw/program templates */
@@ -602,7 +604,6 @@ struct zink_batch_state {
    struct util_dynarray tracked_semaphores; //semaphores which are just tracked
    VkSemaphore sparse_semaphore; //current sparse wait semaphore
    struct util_dynarray fences; //zink_tc_fence refs
-   simple_mtx_t ref_lock;
 
    VkSemaphore present;
    struct zink_resource *swapchain;
@@ -632,8 +633,10 @@ struct zink_batch_state {
    struct zink_batch_obj_list real_objs;
    struct zink_batch_obj_list slab_objs;
    struct zink_batch_obj_list sparse_objs;
+   struct zink_batch_obj_list unsync_objs;
    struct zink_resource_object *last_added_obj;
    struct util_dynarray swapchain_obj; //this doesn't have a zink_bo and must be handled differently
+   struct util_dynarray swapchain_obj_unsync; //this doesn't have a zink_bo and must be handled differently
 
    struct util_dynarray unref_resources;
    struct util_dynarray bindless_releases[2];
@@ -991,8 +994,9 @@ struct zink_shader_module {
 };
 
 struct zink_program {
-   struct pipe_reference reference;
+   EXCLUSIVE_CACHELINE(struct pipe_reference reference);
    struct zink_context *ctx;
+   void *ralloc_ctx;
    blake3_hash blake3;
    struct util_queue_fence cache_fence;
    struct u_rwlock pipeline_cache_lock;
@@ -1367,6 +1371,7 @@ struct zink_transfer {
    struct pipe_resource *staging_res;
    unsigned offset;
    unsigned depthPitch;
+   bool unsync_upload;
 };
 
 
@@ -1454,6 +1459,7 @@ struct zink_screen {
    uint8_t heap_map[ZINK_HEAP_MAX][VK_MAX_MEMORY_TYPES];  // mapping from zink heaps to memory type indices
    uint8_t heap_count[ZINK_HEAP_MAX];  // number of memory types per zink heap
    bool resizable_bar;
+   bool always_cached_upload;
 
    uint64_t total_video_mem;
    uint64_t clamp_video_mem;
@@ -1510,6 +1516,7 @@ struct zink_screen {
    struct vk_uncompacted_dispatch_table vk;
 
    void (*buffer_barrier)(struct zink_context *ctx, struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
+   void (*buffer_barrier_unsync)(struct zink_context *ctx, struct zink_resource *res, VkAccessFlags flags, VkPipelineStageFlags pipeline);
    void (*image_barrier)(struct zink_context *ctx, struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline);
    void (*image_barrier_unsync)(struct zink_context *ctx, struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline);
 
@@ -1686,6 +1693,7 @@ struct zink_sampler_view {
    /* Optional sampler view returning red (depth) in all channels, for shader rewrites. */
    struct zink_surface *zs_view;
    struct zink_zs_swizzle swizzle;
+   struct zink_resource *import2d;
 };
 
 struct zink_image_view {
@@ -1694,6 +1702,7 @@ struct zink_image_view {
       struct zink_surface *surface;
       struct zink_buffer_view *buffer_view;
    };
+   struct zink_resource *import2d;
 };
 
 static inline struct zink_sampler_view *
@@ -1919,6 +1928,7 @@ struct zink_context {
    bool disable_fs;
    bool disable_color_writes;
    bool was_line_loop;
+   bool was_using_depth_bias;
    bool fs_query_active;
    bool occlusion_query_active;
    bool primitives_generated_active;
@@ -2032,6 +2042,7 @@ struct zink_context {
    bool blend_color_changed : 1;
    bool sample_mask_changed : 1;
    bool rast_state_changed : 1;
+   bool depth_bias_changed : 1;
    bool line_width_changed : 1;
    bool dsa_state_changed : 1;
    bool stencil_ref_changed : 1;

@@ -46,6 +46,12 @@ curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
 unzip -d / "$ndk.zip"
 rm "$ndk.zip"
 
+############### Build ANGLE
+
+ANGLE_TARGET=android \
+DEBIAN_ARCH=amd64 \
+. .gitlab-ci/container/build-angle.sh
+
 ############### Build dEQP runner
 
 export ANDROID_NDK_HOME=/$ndk
@@ -53,19 +59,14 @@ export RUST_TARGET=x86_64-linux-android
 . .gitlab-ci/container/build-rust.sh
 . .gitlab-ci/container/build-deqp-runner.sh
 
-rm -rf /root/.cargo
-rm -rf /root/.rustup
+# Properly uninstall rustup including cargo and init scripts on shells
+rustup self uninstall -y
 
-############### Build dEQP GL
+############### Build dEQP
 
 DEQP_API=tools \
 DEQP_TARGET="android" \
 EXTRA_CMAKE_ARGS="-DDEQP_ANDROID_EXE=ON -DDEQP_TARGET_TOOLCHAIN=ndk-modern -DANDROID_NDK_PATH=/$ndk -DANDROID_ABI=x86_64 -DDE_ANDROID_API=$ANDROID_SDK_VERSION" \
-. .gitlab-ci/container/build-deqp.sh
-
-DEQP_API=GL \
-DEQP_TARGET="android" \
-EXTRA_CMAKE_ARGS="-DDEQP_TARGET_TOOLCHAIN=ndk-modern -DANDROID_NDK_PATH=/$ndk -DANDROID_ABI=x86_64 -DDE_ANDROID_API=$ANDROID_SDK_VERSION" \
 . .gitlab-ci/container/build-deqp.sh
 
 DEQP_API=GLES \
@@ -82,18 +83,20 @@ rm -rf /VK-GL-CTS
 
 ############### Downloading Cuttlefish resources ...
 
+uncollapsed_section_start cuttlefish "Downloading, building and installing Cuttlefish"
+
 CUTTLEFISH_PROJECT_PATH=ao2/aosp-manifest
 CUTTLEFISH_BUILD_VERSION_TAGS=mesa-venus
-CUTTLEFISH_BUILD_NUMBER=20250115.001
+CUTTLEFISH_BUILD_NUMBER=20250215.001
 
 mkdir /cuttlefish
 pushd /cuttlefish
 
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
-  -o aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CUTTLEFISH_PROJECT_PATH}/aosp-${CUTTLEFISH_BUILD_VERSION_TAGS}.${CUTTLEFISH_BUILD_NUMBER}/aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip"
+  -o aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CUTTLEFISH_PROJECT_PATH}/aosp-${CUTTLEFISH_BUILD_VERSION_TAGS}.${CUTTLEFISH_BUILD_NUMBER}/aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip"
 
-unzip aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
-rm aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
+unzip aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
+rm aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
 ls -lhS ./*
 
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
@@ -133,7 +136,42 @@ rm -rf android-cuttlefish
 addgroup --system kvm
 usermod -a -G kvm,cvdnetwork root
 
+section_end cuttlefish
+
+############### Downloading Android CTS tools
+
+uncollapsed_section_start android-cts "Downloading Android CTS tools"
+
+ANDROID_CTS_VERSION="${ANDROID_VERSION}_r1"
+ANDROID_CTS_DEVICE_ARCH="x86"
+
+mkdir /android-tools
+pushd /android-tools
+
+curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+  -o "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip" \
+  "https://dl.google.com/dl/android/cts/android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+unzip "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+rm "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+
+# Keep only the interesting tests to save space
+# shellcheck disable=SC2086 # we want word splitting
+ANDROID_CTS_MODULES_KEEP_EXPRESSION=$(printf "%s|" $ANDROID_CTS_MODULES | sed -e 's/|$//g')
+find android-cts/testcases/ -mindepth 1 -type d | grep -v -E "$ANDROID_CTS_MODULES_KEEP_EXPRESSION" | xargs rm -rf
+
+curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+  -o "build-tools_r${ANDROID_SDK_VERSION}-linux.zip" "https://dl.google.com/android/repository/build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+unzip "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+rm "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+mv "android-$ANDROID_VERSION" build-tools
+
+popd
+
+section_end android-cts
+
 ############### Uninstall the build software
+
+uncollapsed_section_switch debian_cleanup "Cleaning up base Debian system"
 
 rm -rf "/${ndk:?}"
 
@@ -141,5 +179,9 @@ export SUDO_FORCE_REMOVE=yes
 apt-get purge -y "${EPHEMERAL[@]}"
 
 . .gitlab-ci/container/container_post_build.sh
+
+section_end debian_cleanup
+
+############### Remove unused packages
 
 . .gitlab-ci/container/strip-rootfs.sh

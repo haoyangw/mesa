@@ -11,7 +11,7 @@
 #include "ac_hw_stage.h"
 #include "ac_shader_args.h"
 #include "ac_shader_util.h"
-#include "nir.h"
+#include "nir_defines.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,7 +89,7 @@ bool ac_nir_optimize_outputs(nir_shader *nir, bool sprite_tex_disallowed,
                              int8_t slot_remap[NUM_TOTAL_VARYING_SLOTS],
                              uint8_t param_export_index[NUM_TOTAL_VARYING_SLOTS]);
 
-void
+bool
 ac_nir_lower_ls_outputs_to_mem(nir_shader *ls,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -97,7 +97,7 @@ ac_nir_lower_ls_outputs_to_mem(nir_shader *ls,
                                uint64_t tcs_inputs_via_temp,
                                uint64_t tcs_inputs_via_lds);
 
-void
+bool
 ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
                               ac_nir_map_io_driver_location map,
                               enum amd_gfx_level gfx_level,
@@ -105,7 +105,7 @@ ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
                               uint64_t tcs_inputs_via_temp,
                               uint64_t tcs_inputs_via_lds);
 
-void
+bool
 ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -113,7 +113,7 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
                                uint32_t tes_patch_inputs_read,
                                unsigned wave_size);
 
-void
+bool
 ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map);
 
@@ -124,14 +124,14 @@ ac_nir_compute_tess_wg_info(const struct radeon_info *info, const struct shader_
                             unsigned num_mem_tcs_outputs, unsigned num_mem_tcs_patch_outputs,
                             unsigned *num_patches_per_wg, unsigned *hw_lds_size);
 
-void
+bool
 ac_nir_lower_es_outputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
                                unsigned esgs_itemsize,
                                uint64_t gs_inputs_read);
 
-void
+bool
 ac_nir_lower_gs_inputs_to_mem(nir_shader *shader,
                               ac_nir_map_io_driver_location map,
                               enum amd_gfx_level gfx_level,
@@ -160,6 +160,12 @@ typedef struct {
    bool kill_layer;
    bool force_vrs;
    bool compact_primitives;
+   /* Skip culling dependent on the viewport state, which is frustum culling and small prim
+    * culling. Set this when the shader writes the viewport index.
+    */
+   bool skip_viewport_state_culling;
+   /* Use the point-triangle intersection to cull small triangles. */
+   bool use_point_tri_intersection;
 
    /* VS */
    unsigned num_vertices_per_primitive;
@@ -175,13 +181,13 @@ typedef struct {
    unsigned gs_out_vtx_bytes;
 } ac_nir_lower_ngg_options;
 
-void
+bool
 ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *options);
 
-void
+bool
 ac_nir_lower_ngg_gs(nir_shader *shader, const ac_nir_lower_ngg_options *options);
 
-void
+bool
 ac_nir_lower_ngg_mesh(nir_shader *shader,
                       const struct radeon_info *hw_info,
                       uint32_t clipdist_enable_mask,
@@ -194,13 +200,13 @@ ac_nir_lower_ngg_mesh(nir_shader *shader,
                       bool has_query,
                       bool fast_launch_2);
 
-void
+bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
                                  unsigned task_payload_entry_bytes,
                                  unsigned task_num_entries,
                                  bool has_query);
 
-void
+bool
 ac_nir_lower_mesh_inputs_to_mem(nir_shader *shader,
                                 unsigned task_payload_entry_bytes,
                                 unsigned task_num_entries);
@@ -239,7 +245,7 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir,
                              bool force_vrs,
                              ac_nir_gs_output_info *output_info);
 
-void
+bool
 ac_nir_lower_legacy_vs(nir_shader *nir,
                        enum amd_gfx_level gfx_level,
                        uint32_t clip_cull_mask,
@@ -251,7 +257,7 @@ ac_nir_lower_legacy_vs(nir_shader *nir,
                        bool kill_layer,
                        bool force_vrs);
 
-void
+bool
 ac_nir_lower_legacy_gs(nir_shader *nir,
                        bool has_gen_prim_query,
                        bool has_pipeline_stats_query,
@@ -333,6 +339,7 @@ typedef struct {
 
    /* Exports. */
    bool uses_discard;
+   bool dcc_decompress_gfx11;
    bool alpha_to_coverage_via_mrtz;
    bool dual_src_blend_swizzle;
    unsigned spi_shader_col_format;
@@ -395,6 +402,9 @@ ac_nir_optimize_uniform_atomics(nir_shader *nir);
 
 unsigned
 ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data);
+
+bool
+ac_nir_might_lower_bit_size(const nir_shader *shader);
 
 bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,

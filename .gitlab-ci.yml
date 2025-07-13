@@ -38,6 +38,9 @@ workflow:
     - if: &is-merge-attempt $GITLAB_USER_LOGIN == "marge-bot" && $CI_PIPELINE_SOURCE == "merge_request_event"
       variables:
         MESA_CI_PERFORMANCE_ENABLED: 1
+        FDO_RUNNER_JOB_PRIORITY_TAG_X86_64: priority:high
+        FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM: priority:high-kvm
+        FDO_RUNNER_JOB_PRIORITY_TAG_AARCH64: priority:high-aarch64
         CI_TRON_JOB_PRIORITY_TAG: ""  # Empty tags are ignored by gitlab
         JOB_PRIORITY: 75
         # fast-fail in merge pipelines: stop early if we get this many unexpected fails/crashes
@@ -51,6 +54,9 @@ workflow:
     # nightly pipeline
     - if: &is-scheduled-pipeline $CI_PIPELINE_SOURCE == "schedule"
       variables:
+        FDO_RUNNER_JOB_PRIORITY_TAG_X86_64: priority:low
+        FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM: priority:low-kvm
+        FDO_RUNNER_JOB_PRIORITY_TAG_AARCH64: priority:low-aarch64
         JOB_PRIORITY: 45
         # (some) nightly builds perform LTO, so they take much longer than the
         # short timeout allowed in other pipelines.
@@ -68,7 +74,7 @@ workflow:
 
 variables:
   FDO_UPSTREAM_REPO: mesa/mesa
-  MESA_TEMPLATES_COMMIT: &ci-templates-commit e195d80f35b45cc73668be3767b923fd76c70ed5
+  MESA_TEMPLATES_COMMIT: &ci-templates-commit 48e4b6c9a2015f969fbe648999d16d5fb3eef6c4
   CI_PRE_CLONE_SCRIPT: |-
           set -o xtrace
           wget -q -O download-git-cache.sh ${CI_PROJECT_URL}/-/raw/${CI_COMMIT_SHA}/.gitlab-ci/download-git-cache.sh
@@ -110,11 +116,15 @@ variables:
   # Avoid the wall of "Unsupported SPIR-V capability" warnings in CI job log, hiding away useful output
   MESA_SPIRV_LOG_LEVEL: error
   # Default priority for non-merge pipelines
+  FDO_RUNNER_JOB_PRIORITY_TAG_X86_64: ""  # Empty tags are ignored by gitlab
+  FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM: kvm
+  FDO_RUNNER_JOB_PRIORITY_TAG_AARCH64: aarch64
   CI_TRON_JOB_PRIORITY_TAG: ci-tron:priority:low
   JOB_PRIORITY: 50
   DATA_STORAGE_PATH: data_storage
 
 default:
+  timeout: 1m # catch any jobs which don't specify a timeout
   id_tokens:
     S3_JWT:
       aud: https://s3.freedesktop.org
@@ -210,6 +220,8 @@ include:
       when: never
 
 
+# Note: make sure the branches in this list are the same as in
+# `.build-only-delayed-rules` below.
 .container+build-rules:
   rules:
     - !reference [.common-rules, rules]
@@ -266,6 +278,49 @@ include:
     # manually triggered
     - when: manual
 
+# Repeat of the above but with `when: on_success` replaced with
+# `when: delayed` + `start_in:`, for build-only jobs.
+# Note: make sure the branches in this list are the same as in
+# `.container+build-rules` above.
+.build-only-delayed-rules:
+  rules:
+    - !reference [.common-rules, rules]
+    # Run when re-enabling a disabled farm, but not when disabling it
+    - !reference [.disable-farm-mr-rules, rules]
+    # Never run immediately after merging, as we just ran everything
+    - !reference [.never-post-merge-rules, rules]
+    # Build everything in merge pipelines, if any files affecting the pipeline
+    # were changed
+    - if: *is-merge-attempt
+      changes: *all_paths
+      when: delayed
+      start_in: &build-delay 5 minutes
+    # Same as above, but for pre-merge pipelines
+    - if: *is-pre-merge
+      changes: *all_paths
+      when: manual
+    # Skip everything for pre-merge and merge pipelines which don't change
+    # anything in the build
+    - if: *is-merge-attempt
+      when: never
+    - if: *is-pre-merge
+      when: never
+    # Build everything after someone bypassed the CI
+    - if: *is-direct-push
+      when: delayed
+      start_in: *build-delay
+    # Build everything when pushing to staging branches
+    - if: *is-staging-push
+      when: delayed
+      start_in: *build-delay
+    # Build everything in scheduled pipelines
+    - if: *is-scheduled-pipeline
+      when: delayed
+      start_in: *build-delay
+    # Allow building everything in fork pipelines, but build nothing unless
+    # manually triggered
+    - when: manual
+
 
 .ci-deqp-artifacts:
   artifacts:
@@ -288,9 +343,6 @@ make git archive:
   stage: git-archive
   rules:
     - !reference [.scheduled_pipeline-rules, rules]
-  # ensure we are running on packet
-  tags:
-    - packet.net
   script:
     # Compactify the .git directory
     - git gc --aggressive
@@ -306,6 +358,8 @@ sanity:
   extends:
     - .fdo.ci-fairy
   stage: sanity
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
   rules:
     - if: *is-pre-merge
       when: on_success
@@ -346,14 +400,14 @@ sanity:
     when: on_failure
     reports:
       junit: check-*.xml
-  tags:
-    - placeholder-job
 
 
 mr-label-maker-test:
   extends:
     - .fdo.ci-fairy
   stage: sanity
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
   rules:
     - !reference [.mr-label-maker-rules, rules]
   variables:
@@ -371,5 +425,7 @@ mr-label-maker-test:
   needs:
     - job: rustfmt
       optional: true
+      artifacts: false
     - job: yaml-toml-shell-py-test
       optional: true
+      artifacts: false

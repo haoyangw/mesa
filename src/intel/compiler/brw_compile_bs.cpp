@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
-#include "brw_fs_live_variables.h"
+#include "brw_analysis.h"
+#include "brw_shader.h"
 #include "brw_generator.h"
 #include "brw_nir.h"
 #include "brw_cfg.h"
@@ -32,13 +32,13 @@ brw_bsr(const struct intel_device_info *devinfo,
 }
 
 static bool
-run_bs(fs_visitor &s, bool allow_spilling)
+run_bs(brw_shader &s, bool allow_spilling)
 {
    assert(s.stage >= MESA_SHADER_RAYGEN && s.stage <= MESA_SHADER_CALLABLE);
 
-   s.payload_ = new bs_thread_payload(s);
+   s.payload_ = new brw_bs_thread_payload(s);
 
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (s.failed)
       return false;
@@ -75,7 +75,6 @@ compile_single_bs(const struct brw_compiler *compiler,
 {
    const bool debug_enabled = brw_should_print_shader(shader, DEBUG_RT);
 
-   prog_data->base.stage = shader->info.stage;
    prog_data->max_stack_size = MAX2(prog_data->max_stack_size,
                                     shader->scratch_size);
 
@@ -94,7 +93,7 @@ compile_single_bs(const struct brw_compiler *compiler,
       .required_width = compiler->devinfo->ver >= 20 ? 16u : 8u,
    };
 
-   std::unique_ptr<fs_visitor> v[2];
+   std::unique_ptr<brw_shader> v[2];
 
    for (unsigned simd = 0; simd < ARRAY_SIZE(v); simd++) {
       if (!brw_simd_should_compile(simd_state, simd))
@@ -105,7 +104,7 @@ compile_single_bs(const struct brw_compiler *compiler,
       if (dispatch_width == 8 && compiler->devinfo->ver >= 20)
          continue;
 
-      v[simd] = std::make_unique<fs_visitor>(compiler, &params->base,
+      v[simd] = std::make_unique<brw_shader>(compiler, &params->base,
                                              &key->base,
                                              &prog_data->base, shader,
                                              dispatch_width,
@@ -137,7 +136,7 @@ compile_single_bs(const struct brw_compiler *compiler,
    }
 
    assert(selected_simd < int(ARRAY_SIZE(v)));
-   fs_visitor *selected = v[selected_simd].get();
+   brw_shader *selected = v[selected_simd].get();
    assert(selected);
 
    const unsigned dispatch_width = selected->dispatch_width;
@@ -169,9 +168,7 @@ brw_compile_bs(const struct brw_compiler *compiler,
    nir_shader **resume_shaders = params->resume_shaders;
    const bool debug_enabled = brw_should_print_shader(shader, DEBUG_RT);
 
-   prog_data->base.stage = shader->info.stage;
-   prog_data->base.ray_queries = shader->info.ray_queries;
-   prog_data->base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base, &params->base);
 
    prog_data->max_stack_size = 0;
    prog_data->num_resume_shaders = num_resume_shaders;

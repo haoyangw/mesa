@@ -37,6 +37,10 @@ extern const struct nir_shader_compiler_options brw_scalar_nir_options;
 int type_size_vec4(const struct glsl_type *type, bool bindless);
 int type_size_dvec4(const struct glsl_type *type, bool bindless);
 
+struct brw_mem_access_cb_data {
+   const struct intel_device_info *devinfo;
+};
+
 static inline int
 type_size_scalar_bytes(const struct glsl_type *type, bool bindless)
 {
@@ -139,8 +143,7 @@ brw_nir_ubo_surface_index_get_bti(nir_src src)
 /* Returns true if a fragment shader needs at least one render target */
 static inline bool
 brw_nir_fs_needs_null_rt(const struct intel_device_info *devinfo,
-                         nir_shader *nir,
-                         bool multisample_fbo, bool alpha_to_coverage)
+                         nir_shader *nir, bool alpha_to_coverage)
 {
    assert(nir->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -150,12 +153,15 @@ brw_nir_fs_needs_null_rt(const struct intel_device_info *devinfo,
    if (devinfo->ver < 11)
       return true;
 
-   uint64_t relevant_outputs = 0;
-   if (multisample_fbo)
-      relevant_outputs |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
+   /* Depth/Stencil needs a valid render target even if there is no color
+    * output.
+    */
+   if (nir->info.outputs_written & (BITFIELD_BIT(FRAG_RESULT_DEPTH) |
+                                    BITFIELD_BIT(FRAG_RESULT_STENCIL) |
+                                    BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)))
+      return true;
 
-   return (alpha_to_coverage ||
-           (nir->info.outputs_written & relevant_outputs) != 0);
+   return alpha_to_coverage;
 }
 
 void brw_preprocess_nir(const struct brw_compiler *compiler,
@@ -191,10 +197,20 @@ struct brw_nir_lower_storage_image_opts {
 
    bool lower_loads;
    bool lower_stores;
+   bool lower_stores_64bit;
 };
 
 bool brw_nir_lower_storage_image(nir_shader *nir,
                                  const struct brw_nir_lower_storage_image_opts *opts);
+
+bool brw_nir_lower_texel_address(nir_shader *shader,
+                                 const struct intel_device_info *devinfo,
+                                 enum isl_tiling tiling);
+
+bool brw_nir_lower_texture(nir_shader *nir,
+                           const struct intel_device_info *devinfo);
+
+bool brw_nir_lower_sample_index_in_coord(nir_shader *nir);
 
 bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader,
                                         const struct

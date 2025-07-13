@@ -252,7 +252,8 @@ pan_image_view_get_zs_plane(const struct pan_image_view *iview)
    return pan_image_view_get_plane(iview, 0);
 }
 
-unsigned panfrost_compute_checksum_size(struct pan_image_slice_layout *slice,
+unsigned panfrost_compute_checksum_size(unsigned arch,
+                                        struct pan_image_slice_layout *slice,
                                         unsigned width, unsigned height);
 
 /* AFBC format mode. The ordering is intended to match the Valhall hardware enum
@@ -418,6 +419,12 @@ void GENX(panfrost_texture_afbc_reswizzle)(struct pan_image_view *iview);
 void GENX(panfrost_new_texture)(const struct pan_image_view *iview,
                                 struct mali_texture_packed *out,
                                 const struct panfrost_ptr *payload);
+
+#if PAN_ARCH >= 9
+void GENX(panfrost_new_storage_texture)(const struct pan_image_view *iview,
+                                        struct mali_texture_packed *out,
+                                        const struct panfrost_ptr *payload);
+#endif
 #endif
 
 unsigned panfrost_get_layer_stride(const struct pan_image_layout *layout,

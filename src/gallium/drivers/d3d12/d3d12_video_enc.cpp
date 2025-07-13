@@ -641,14 +641,18 @@ d3d12_video_encoder_create_reference_picture_manager(struct d3d12_video_encoder 
 #if VIDEO_CODEC_H264ENC
       case PIPE_VIDEO_FORMAT_MPEG4_AVC:
       {
-         pD3D12Enc->m_upDPBManager = std::make_unique<d3d12_video_encoder_references_manager_h264>();
+         bool     fArrayOfTextures = ((pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
+                                 D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS) == 0);
+         pD3D12Enc->m_upDPBManager = std::make_unique<d3d12_video_encoder_references_manager_h264>(fArrayOfTextures);
          pD3D12Enc->m_upBitstreamBuilder = std::make_unique<d3d12_video_bitstream_builder_h264>();
       } break;
 #endif
 #if VIDEO_CODEC_H265ENC
       case PIPE_VIDEO_FORMAT_HEVC:
       {
-         pD3D12Enc->m_upDPBManager = std::make_unique<d3d12_video_encoder_references_manager_hevc>();
+         bool     fArrayOfTextures = ((pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags &
+                                 D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS) == 0);
+         pD3D12Enc->m_upDPBManager = std::make_unique<d3d12_video_encoder_references_manager_hevc>(fArrayOfTextures);
          pD3D12Enc->m_upBitstreamBuilder = std::make_unique<d3d12_video_bitstream_builder_hevc>();
       } break;
 #endif
@@ -1732,6 +1736,10 @@ d3d12_video_encoder_create_encoder(struct pipe_context *context, const struct pi
    pD3D12Enc->max_quality_levels = context->screen->get_video_param(context->screen, codec->profile,
                                     codec->entrypoint,
                                     PIPE_VIDEO_CAP_ENC_QUALITY_LEVEL);
+
+   // Cache texture array requirement for reconstructed frames for d3d12_video_create_dpb_buffer calls
+   if (d3d12_video_encode_requires_texture_array_dpb(pD3D12Enc->m_pD3D12Screen, codec->profile))
+      pD3D12Enc->m_currentEncodeCapabilities.m_SupportFlags |= D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS;
 
    return &pD3D12Enc->base;
 

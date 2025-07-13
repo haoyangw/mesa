@@ -79,6 +79,8 @@ extern "C" {
 /* Fencepost problem, hence the off-by-one */
 #define NR_BO_CACHE_BUCKETS (MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1)
 
+struct panfrost_precomp_cache;
+
 struct panfrost_device {
    /* For ralloc */
    void *memctx;
@@ -111,6 +113,7 @@ struct panfrost_device {
 
    /* Maximum tilebuffer size in bytes for optimal performance. */
    unsigned optimal_tib_size;
+   unsigned optimal_z_tib_size;
 
    unsigned thread_tls_alloc;
    struct panfrost_tiler_features tiler_features;
@@ -175,6 +178,8 @@ struct panfrost_device {
     * unconditionally on Bifrost, and useful for sharing with Midgard */
 
    struct panfrost_bo *sample_positions;
+
+   struct panfrost_precomp_cache *precomp_cache;
 };
 
 static inline int

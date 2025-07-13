@@ -102,6 +102,15 @@ panvk_image_can_use_mod(struct panvk_image *image, uint64_t mod)
    }
 
    if (mod == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED) {
+      /* Multiplanar YUV with U-interleaving isn't supported by the HW. We
+       * also need to make sure images that can be aliased to planes of
+       * multi-planar images remain compatible with the aliased images, so
+       * don't allow U-interleaving for those either.
+       */
+      if (vk_format_get_plane_count(image->vk.format) > 1 ||
+          vk_image_can_be_aliased_to_yuv_plane(&image->vk))
+         return false;
+
       /* If we're dealing with a compressed format that requires non-compressed
        * views we can't use U_INTERLEAVED tiling because the tiling is different
        * between compressed and non-compressed formats. If we wanted to support
@@ -218,10 +227,12 @@ panvk_image_init_layouts(struct panvk_image *image,
       image->plane_count = 2;
 
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
-      VkFormat format =
-         (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) ?
-         ((plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT) :
-         image->vk.format;
+      VkFormat format;
+
+      if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+         format = plane == 0 ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
+      else
+         format = vk_format_get_plane_format(image->vk.format, plane);
 
       struct pan_image_explicit_layout plane_layout;
       if (explicit_info)
@@ -233,8 +244,10 @@ panvk_image_init_layouts(struct panvk_image *image,
       image->planes[plane].layout = (struct pan_image_layout){
          .format = vk_format_to_pipe_format(format),
          .dim = panvk_image_type_to_mali_tex_dim(image->vk.image_type),
-         .width = image->vk.extent.width,
-         .height = image->vk.extent.height,
+         .width = vk_format_get_plane_width(image->vk.format, plane,
+                                            image->vk.extent.width),
+         .height = vk_format_get_plane_height(image->vk.format, plane,
+                                              image->vk.extent.height),
          .depth = image->vk.extent.depth,
          .array_size = image->vk.array_layers,
          .nr_samples = image->vk.samples,
@@ -251,46 +264,47 @@ static void
 panvk_image_pre_mod_select_meta_adjustments(struct panvk_image *image)
 {
    const VkImageAspectFlags aspects = vk_format_aspects(image->vk.format);
+   const VkImageUsageFlags all_usage =
+      image->vk.usage | image->vk.stencil_usage;
 
    /* We do image blit/resolve with vk_meta, so when an image is flagged as
     * being a potential transfer source, we also need to add the sampled usage.
     */
-   if (image->vk.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+   if (image->vk.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
       image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-      if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
-         image->vk.stencil_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-   }
+   if (image->vk.stencil_usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+      image->vk.stencil_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
+   /* Similarly, image that can be a transfer destination can be attached
+    * as a color or depth-stencil attachment by vk_meta. */
    if (image->vk.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) {
-      /* Similarly, image that can be a transfer destination can be attached
-       * as a color or depth-stencil attachment by vk_meta. */
       if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
          image->vk.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-
-      if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
-         image->vk.stencil_usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 
       if (aspects & VK_IMAGE_ASPECT_COLOR_BIT) {
          image->vk.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
          image->vk.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
       }
-
-      /* vk_meta creates 2D array views of 3D images. */
-      if (image->vk.image_type == VK_IMAGE_TYPE_3D)
-         image->vk.create_flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
    }
+
+   if (image->vk.stencil_usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+      image->vk.stencil_usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+   /* vk_meta creates 2D array views of 3D images. */
+   if (all_usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT &&
+       image->vk.image_type == VK_IMAGE_TYPE_3D)
+      image->vk.create_flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
 
    /* Needed for resolve operations. */
    if (image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
       image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
-   if (image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
-      if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
-         image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+   if (image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT &&
+       aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
+      image->vk.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
-      if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
-         image->vk.stencil_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-   }
+   if (image->vk.stencil_usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+      image->vk.stencil_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
    if ((image->vk.usage &
         (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) &&
@@ -495,8 +509,9 @@ panvk_GetDeviceImageSparseMemoryRequirements(VkDevice device,
    *pSparseMemoryRequirementCount = 0;
 }
 
-static void
-panvk_image_plane_bind(struct pan_image *plane, struct pan_kmod_bo *bo,
+static VkResult
+panvk_image_plane_bind(struct panvk_device *dev,
+                       struct pan_image *plane, struct pan_kmod_bo *bo,
                        uint64_t base, uint64_t offset)
 {
    plane->data.base = base;
@@ -507,7 +522,9 @@ panvk_image_plane_bind(struct pan_image *plane, struct pan_kmod_bo *bo,
       void *bo_base = pan_kmod_bo_mmap(bo, 0, pan_kmod_bo_size(bo),
                                        PROT_WRITE, MAP_SHARED, NULL);
 
-      assert(bo_base != MAP_FAILED);
+      if (bo_base == MAP_FAILED)
+         return panvk_errorf(dev, VK_ERROR_OUT_OF_HOST_MEMORY,
+                             "Failed to CPU map AFBC image plane");
 
       for (unsigned layer = 0; layer < plane->layout.array_size;
            layer++) {
@@ -524,18 +541,22 @@ panvk_image_plane_bind(struct pan_image *plane, struct pan_kmod_bo *bo,
       ASSERTED int ret = os_munmap(bo_base, pan_kmod_bo_size(bo));
       assert(!ret);
    }
+
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
 panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
                        const VkBindImageMemoryInfo *pBindInfos)
 {
-   const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-      vk_find_struct_const(pBindInfos->pNext, BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
+   VK_FROM_HANDLE(panvk_device, dev, device);
 
    for (uint32_t i = 0; i < bindInfoCount; ++i) {
       VK_FROM_HANDLE(panvk_image, image, pBindInfos[i].image);
       struct pan_kmod_bo *old_bo = image->bo;
+      const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
+         vk_find_struct_const(pBindInfos[i].pNext,
+                              BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
 
       if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
          VkImage wsi_vk_image = wsi_common_get_image(swapchain_info->swapchain,
@@ -546,9 +567,11 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
          assert(wsi_image->plane_count == 1);
 
          image->bo = pan_kmod_bo_get(wsi_image->bo);
-         panvk_image_plane_bind(&image->planes[0], image->bo,
-                                wsi_image->planes[0].data.base,
-                                wsi_image->planes[0].data.offset);
+         VkResult result = panvk_image_plane_bind(
+            dev, &image->planes[0], image->bo, wsi_image->planes[0].data.base,
+            wsi_image->planes[0].data.offset);
+         if (result != VK_SUCCESS)
+            return result;
       } else {
          VK_FROM_HANDLE(panvk_device_memory, mem, pBindInfos[i].memory);
          assert(mem);
@@ -560,12 +583,18 @@ panvk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
                                     BIND_IMAGE_PLANE_MEMORY_INFO);
             uint8_t plane =
                panvk_plane_index(image->vk.format, plane_info->planeAspect);
-            panvk_image_plane_bind(&image->planes[plane], image->bo,
-                                   mem->addr.dev, offset);
+            VkResult result = panvk_image_plane_bind(
+               dev, &image->planes[plane], image->bo, mem->addr.dev,
+               offset);
+            if (result != VK_SUCCESS)
+               return result;
          } else {
             for (unsigned plane = 0; plane < image->plane_count; plane++) {
-               panvk_image_plane_bind(&image->planes[plane], image->bo,
-                                      mem->addr.dev, offset);
+               VkResult result = panvk_image_plane_bind(
+                 dev, &image->planes[plane], image->bo, mem->addr.dev,
+                 offset);
+               if (result != VK_SUCCESS)
+                  return result;
                offset += image->planes[plane].layout.data_size;
             }
          }

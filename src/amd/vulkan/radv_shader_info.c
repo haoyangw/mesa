@@ -372,8 +372,6 @@ gather_xfb_info(const nir_shader *nir, struct radv_shader_info *info)
       return;
 
    const nir_xfb_info *xfb = nir->xfb_info;
-   assert(xfb->output_count <= MAX_SO_OUTPUTS);
-   so->num_outputs = xfb->output_count;
 
    u_foreach_bit(output_buffer, xfb->buffers_written) {
       unsigned stream = xfb->buffer_to_stream[output_buffer];
@@ -535,7 +533,7 @@ gather_shader_info_ngg_query(struct radv_device *device, struct radv_shader_info
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
    info->gs.has_pipeline_stat_query = pdev->emulate_ngg_gs_query_pipeline_stat && info->stage == MESA_SHADER_GEOMETRY;
-   info->has_xfb_query = info->so.num_outputs > 0;
+   info->has_xfb_query = !!info->so.enabled_stream_buffers_mask;
    info->has_prim_query = device->cache_key.primitives_generated_query || info->has_xfb_query;
 }
 
@@ -596,8 +594,10 @@ gather_shader_info_vs(struct radv_device *device, const nir_shader *nir,
    info->vs.needs_base_instance |= info->vs.has_prolog;
    info->vs.needs_draw_id |= info->vs.has_prolog;
 
-   if (info->vs.dynamic_inputs)
-      info->vs.vb_desc_usage_mask = BITFIELD_MASK(util_last_bit(info->vs.vb_desc_usage_mask));
+   if (info->vs.dynamic_inputs) {
+      info->vs.num_attributes = util_last_bit(info->vs.vb_desc_usage_mask);
+      info->vs.vb_desc_usage_mask = BITFIELD_MASK(info->vs.num_attributes);
+   }
 
    /* When the topology is unknown (with GPL), the number of vertices per primitive needs be passed
     * through a user SGPR for NGG streamout with VS. Otherwise, the XFB offset is incorrectly
@@ -967,7 +967,7 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
 
    info->ps.allow_flat_shading =
       !(uses_persp_or_linear_interp || info->ps.needs_sample_positions || info->ps.reads_frag_shading_rate ||
-        info->ps.writes_memory || nir->info.fs.needs_quad_helper_invocations ||
+        info->ps.writes_memory || nir->info.fs.needs_coarse_quad_helper_invocations ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PIXEL_COORD) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_POINT_COORD) ||
@@ -997,7 +997,8 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
       info->ps.spi_shader_col_format = gfx_state->ps.epilog.spi_shader_col_format;
 
       /* Clear color attachments that aren't exported by the FS to match IO shader arguments. */
-      info->ps.spi_shader_col_format &= info->ps.colors_written;
+      if (!info->ps.mrt0_is_dual_src)
+         info->ps.spi_shader_col_format &= info->ps.colors_written;
 
       info->ps.cb_shader_mask = ac_get_cb_shader_mask(info->ps.spi_shader_col_format);
    }
@@ -1266,6 +1267,7 @@ radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shader *n
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SUBGROUP_ID) |
                                         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS) |
                                         radv_shader_should_clear_lds(device, nir);
+   info->cs.derivative_group = nir->info.derivative_group;
 
    if (nir->info.stage == MESA_SHADER_COMPUTE || nir->info.stage == MESA_SHADER_TASK ||
        nir->info.stage == MESA_SHADER_MESH) {
@@ -1440,7 +1442,7 @@ gfx10_get_ngg_scratch_lds_base(const struct radv_device *device, const struct ra
    } else {
       const bool uses_instanceid = es_info->vs.needs_instance_id;
       const bool uses_primitive_id = es_info->uses_prim_id;
-      const bool streamout_enabled = es_info->so.num_outputs && pdev->use_ngg_streamout;
+      const bool streamout_enabled = es_info->so.enabled_stream_buffers_mask && pdev->use_ngg_streamout;
       const uint32_t num_outputs =
          es_info->stage == MESA_SHADER_VERTEX ? es_info->vs.num_outputs : es_info->tes.num_outputs;
       unsigned pervertex_lds_bytes = ac_ngg_nogs_get_pervertex_lds_size(
@@ -1524,7 +1526,7 @@ gfx10_get_ngg_info(const struct radv_device *device, struct radv_shader_info *es
       /* LDS size for passing data from GS to ES. */
       struct radv_streamout_info *so_info = &es_info->so;
 
-      if (so_info->num_outputs) {
+      if (so_info->enabled_stream_buffers_mask) {
          /* Compute the same pervertex LDS size as the NGG streamout lowering pass which allocates
           * space for all outputs.
           * TODO: only alloc space for outputs that really need streamout.

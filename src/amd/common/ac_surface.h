@@ -10,11 +10,6 @@
 #include "amd_family.h"
 #include "util/format/u_format.h"
 
-/* NIR is optional. Some components don't want to include NIR with ac_surface.h. */
-#ifdef AC_SURFACE_INCLUDE_NIR
-#include "compiler/nir/nir_builder.h"
-#endif
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -256,6 +251,13 @@ struct gfx9_surf_layout {
    /* DCC or HTILE level info */
    struct gfx9_surf_meta_level meta_levels[RADEON_SURF_MAX_LEVELS];
 
+   /* Gfx12 DCC recompression settings used by kernel memory management.
+    * The driver sets these, not ac_compute_surface.
+    */
+   uint8_t dcc_number_type; /* CB_COLOR0_INFO.NUMBER_TYPE */
+   uint8_t dcc_data_format; /* [0:4]:CB_COLOR0_INFO.FORMAT, [5]:MM */
+   bool dcc_write_compress_disable;
+
    union {
       /* Color */
       struct {
@@ -269,14 +271,6 @@ struct gfx9_surf_layout {
          uint8_t dcc_block_width;
          uint8_t dcc_block_height;
          uint8_t dcc_block_depth;
-
-         /* Gfx12 DCC recompression settings used by kernel memory management.
-          * The driver sets these, not ac_compute_surface.
-          */
-         uint8_t dcc_number_type; /* CB_COLOR0_INFO.NUMBER_TYPE */
-         uint8_t dcc_data_format; /* [0:4]:CB_COLOR0_INFO.FORMAT, [5]:MM */
-         bool dcc_write_compress_disable;
-
          /* Displayable DCC. This is always rb_aligned=0 and pipe_aligned=0.
           * The 3D engine doesn't support that layout except for chips with 1 RB.
           * All other chips must set rb_aligned=1.
@@ -514,30 +508,6 @@ void ac_surface_print_info(FILE *out, const struct radeon_info *info,
 
 bool ac_surface_supports_dcc_image_stores(enum amd_gfx_level gfx_level,
                                           const struct radeon_surf *surf);
-
-#ifdef AC_SURFACE_INCLUDE_NIR
-nir_def *ac_nir_dcc_addr_from_coord(nir_builder *b, const struct radeon_info *info,
-                                    unsigned bpe, const struct gfx9_meta_equation *equation,
-                                    nir_def *dcc_pitch, nir_def *dcc_height,
-                                    nir_def *dcc_slice_size,
-                                    nir_def *x, nir_def *y, nir_def *z,
-                                    nir_def *sample, nir_def *pipe_xor);
-
-nir_def *ac_nir_cmask_addr_from_coord(nir_builder *b, const struct radeon_info *info,
-                                      const struct gfx9_meta_equation *equation,
-                                      nir_def *cmask_pitch, nir_def *cmask_height,
-                                      nir_def *cmask_slice_size,
-                                      nir_def *x, nir_def *y, nir_def *z,
-                                      nir_def *pipe_xor,
-                                      nir_def **bit_position);
-
-nir_def *ac_nir_htile_addr_from_coord(nir_builder *b, const struct radeon_info *info,
-                                      const struct gfx9_meta_equation *equation,
-                                      nir_def *htile_pitch,
-                                      nir_def *htile_slice_size,
-                                      nir_def *x, nir_def *y, nir_def *z,
-                                      nir_def *pipe_xor);
-#endif
 
 #ifdef __cplusplus
 }

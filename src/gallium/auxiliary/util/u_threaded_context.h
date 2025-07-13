@@ -465,7 +465,7 @@ struct tc_renderpass_info {
       uint32_t data32[2];
       /* cso info is in data16[2] */
       uint16_t data16[4];
-      /* zsbuf fb info is in data8[3] */
+      /* zsbuf fb info is in data8[3] & BITFIELD_MASK(4) */
       uint8_t data8[8];
    };
 };
@@ -518,9 +518,13 @@ struct tc_batch {
    /* whether the first set_framebuffer_state call has been seen by this batch */
    bool first_set_fb;
    uint8_t batch_idx;
+   uint32_t generation;
    struct tc_unflushed_batch_token *token;
    uint64_t slots[TC_SLOTS_PER_BATCH];
    struct util_dynarray renderpass_infos;
+#if !defined(NDEBUG)
+   bool closed;
+#endif
 };
 
 struct tc_buffer_list {
@@ -631,6 +635,7 @@ struct threaded_context {
    int8_t last_completed;
 
    uint8_t num_vertex_buffers;
+   unsigned last_generation_completed;
    unsigned max_const_buffers;
    unsigned max_shader_buffers;
    unsigned max_images;
@@ -708,6 +713,10 @@ tc_add_draw_single_call(struct pipe_context *_pipe,
                         struct pipe_resource *index_bo);
 struct pipe_vertex_buffer *
 tc_add_set_vertex_buffers_call(struct pipe_context *_pipe, unsigned count);
+
+struct pipe_vertex_buffer *
+tc_add_set_vertex_elements_and_buffers_call(struct pipe_context *_pipe,
+                                            unsigned count);
 
 void
 tc_draw_vbo(struct pipe_context *_pipe, const struct pipe_draw_info *info,
@@ -829,6 +838,19 @@ tc_track_vertex_buffer(struct pipe_context *_pipe, unsigned index,
    } else {
       tc_unbind_buffer(&tc->vertex_buffers[index]);
    }
+}
+
+/**
+ * "buffers" must be a result of tc_add_set_vertex_elements_and_buffers_call.
+ * This sets the vertex elements state for it. It will be bound before vertex
+ * buffers.
+ */
+static inline void
+tc_set_vertex_elements_for_call(struct pipe_vertex_buffer *buffers,
+                                void *state)
+{
+   void **ptr = (void**)buffers;
+   ptr[-1] = state;
 }
 
 #ifdef __cplusplus

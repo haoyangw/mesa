@@ -20,11 +20,13 @@
 #include "asahi/lib/agx_bo.h"
 #include "asahi/lib/agx_device.h"
 #include "asahi/libagx/geometry.h"
+#include "compiler/nir/nir_builder.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/simple_mtx.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
+#include "layout.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
 #include "vk_debug_utils.h"
@@ -57,7 +59,10 @@ hk_upload_rodata(struct hk_device *dev)
    dev->rodata.bo =
       agx_bo_create(&dev->dev, AGX_SAMPLER_LENGTH, 0, 0, "Read only data");
 
-   if (!dev->rodata.bo)
+   dev->sparse.write =
+      agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "Sparse write page");
+
+   if (!dev->rodata.bo || !dev->sparse.write)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    uint8_t *map = agx_bo_map(dev->rodata.bo);
@@ -102,14 +107,6 @@ hk_upload_rodata(struct hk_device *dev)
    offs = align(offs, sizeof(uint64_t));
    dev->rodata.geometry_state = dev->rodata.bo->va->addr + offs;
    offs += sizeof(struct agx_geometry_state);
-
-   /* For null readonly buffers, we need to allocate 16 bytes of zeroes for
-    * robustness2 semantics on read.
-    */
-   offs = align(offs, 16);
-   dev->rodata.zero_sink = dev->rodata.bo->va->addr + offs;
-   memset(map + offs, 0, 16);
-   offs += 16;
 
    /* For null storage descriptors, we need to reserve 16 bytes to catch writes.
     * No particular content is required; we cannot get robustness2 semantics
@@ -288,9 +285,8 @@ hk_check_status(struct vk_device *device)
 static VkResult
 hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 {
-   // struct hk_device *dev = container_of(device, struct hk_device, vk);
-   unreachable("todo");
-   // *timestamp = agx_get_gpu_timestamp(dev);
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   *timestamp = agx_get_gpu_timestamp(&dev->dev);
    return VK_SUCCESS;
 }
 
@@ -306,7 +302,7 @@ hk_upload_null_descriptors(struct hk_device *dev)
    struct agx_pbe_packed null_pbe;
    uint32_t offset_tex, offset_pbe;
 
-   agx_set_null_texture(&null_tex, dev->rodata.null_sink);
+   agx_set_null_texture(&null_tex);
    agx_set_null_pbe(&null_pbe, dev->rodata.null_sink);
 
    hk_descriptor_table_add(dev, &dev->images, &null_tex, sizeof(null_tex),
@@ -408,6 +404,14 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.check_status = hk_check_status;
    dev->vk.get_timestamp = hk_get_timestamp;
 
+   /* This holds for current platforms. We do not currently implement
+    * timestamp scaling, this would require changes in the query copy kernel
+    * as well. Calibrated timestamps depends on this.
+    */
+   assert(dev->dev.user_timestamp_to_ns.num ==
+             dev->dev.user_timestamp_to_ns.den &&
+          "user timestamps are in ns");
+
    result = hk_descriptor_table_init(dev, &dev->images, AGX_TEXTURE_LENGTH,
                                      1024, 1024 * 1024);
    if (result != VK_SUCCESS)
@@ -463,6 +467,23 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
 
+   /* Precompile an empty fragment shader that can be used to handle API-level
+    * null fragment shaders. We do this at device-time to make binds cheap.
+    * Regardless, compiling this shader should be fast.
+    */
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                  &agx_nir_options, "empty FS");
+   struct vk_shader_compile_info info = {
+      .nir = b.shader,
+      .robustness = &vk_robustness_disabled,
+      .stage = MESA_SHADER_FRAGMENT,
+   };
+   hk_compile_shader(dev, &info, NULL, pAllocator, &dev->null_fs);
+   if (!dev->null_fs) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_meta;
+   }
+
    *pDevice = hk_device_to_handle(dev);
 
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
@@ -476,12 +497,15 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_meta:
+   hk_device_finish_meta(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->mem_cache, NULL);
 fail_queue:
    hk_queue_finish(dev, &dev->queue);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   agx_bo_unreference(&dev->dev, dev->sparse.write);
 fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_internal_shaders_2:
@@ -530,10 +554,15 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_scratch_fini(&dev->scratch.cs);
    simple_mtx_destroy(&dev->scratch.lock);
 
+   if (dev->null_fs) {
+      hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
+   }
+
    hk_destroy_sampler_heap(dev, &dev->samplers);
    hk_descriptor_table_finish(dev, &dev->images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   agx_bo_unreference(&dev->dev, dev->sparse.write);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);

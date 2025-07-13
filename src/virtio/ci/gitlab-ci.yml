@@ -5,7 +5,6 @@ venus-lavapipe:
   extends:
     - .deqp-test
     - .venus-lavapipe-test
-  timeout: 25m
   variables:
     DEQP_FRACTION: 60
     DEQP_SUITE: venus
@@ -41,8 +40,8 @@ venus-lavapipe-full:
   extends:
     - .test-android
     - .venus-manual-rules
+    - .test-angle
   variables:
-    USE_ANGLE: 1
     ANDROID_GPU_MODE: venus_guest_angle
     GPU_VERSION: venus
     DEQP_SUITE: android-venus-angle

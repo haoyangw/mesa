@@ -610,11 +610,10 @@ etna_compute_tileoffset(const struct pipe_box *box, enum pipe_format format,
 }
 
 static inline void
-etna_get_rs_alignment_mask(const struct etna_context *ctx,
+etna_get_rs_alignment_mask(const struct etna_screen *screen,
                            const enum etna_surface_layout layout,
                            unsigned int *width_mask, unsigned int *height_mask)
 {
-   struct etna_screen *screen = ctx->screen;
    unsigned int h_align, w_align;
 
    if (layout & ETNA_LAYOUT_BIT_SUPER) {
@@ -713,7 +712,7 @@ etna_try_rs_blit(struct pipe_context *pctx,
 
    unsigned w_mask, h_mask;
 
-   etna_get_rs_alignment_mask(ctx, src->layout, &w_mask, &h_mask);
+   etna_get_rs_alignment_mask(ctx->screen, src->layout, &w_mask, &h_mask);
    if ((blit_info->src.box.x & w_mask) || (blit_info->src.box.y & h_mask)) {
       DBG("src x/y not properly aligned: %d %d",
           blit_info->src.box.x,
@@ -721,7 +720,7 @@ etna_try_rs_blit(struct pipe_context *pctx,
       return false;
    }
 
-   etna_get_rs_alignment_mask(ctx, dst->layout, &w_mask, &h_mask);
+   etna_get_rs_alignment_mask(ctx->screen, dst->layout, &w_mask, &h_mask);
    if ((blit_info->dst.box.x & w_mask) || (blit_info->dst.box.y & h_mask)) {
       DBG("dst x/y not properly aligned: %d %d",
           blit_info->src.box.x,
@@ -893,8 +892,8 @@ etna_try_rs_blit(struct pipe_context *pctx,
 
 manual:
    if (src->layout == ETNA_LAYOUT_TILED && dst->layout == ETNA_LAYOUT_TILED) {
-      if ((etna_resource_status(ctx, src) & ETNA_PENDING_WRITE) ||
-          (etna_resource_status(ctx, dst) & ETNA_PENDING_WRITE))
+      if ((etna_resource_status(ctx, &src->base) & ETNA_PENDING_WRITE) ||
+          (etna_resource_status(ctx, &dst->base) & ETNA_PENDING_WRITE))
          etna_flush(pctx, NULL, 0, true);
 
       perf_debug_ctx(ctx, "RS blit falls back to sw");
@@ -905,6 +904,50 @@ manual:
    return false;
 }
 
+static void
+etna_emit_yuv_tiler_state_rs(struct etna_context *ctx, struct etna_yuv_config *config)
+{
+   struct etna_cmd_stream *stream = ctx->stream;
+
+   etna_set_state(stream, VIVS_YUV_CONFIG,
+                  VIVS_YUV_CONFIG_SOURCE_FORMAT(config->format) | VIVS_YUV_CONFIG_ENABLE);
+   etna_set_state(stream, VIVS_YUV_WINDOW_SIZE,
+                  VIVS_YUV_WINDOW_SIZE_HEIGHT(config->height) |
+                  VIVS_YUV_WINDOW_SIZE_WIDTH(config->width));
+
+   etna_yuv_emit_plane(ctx, config->planes[0], ETNA_PENDING_READ, VIVS_YUV_Y_BASE, VIVS_YUV_Y_STRIDE);
+   etna_yuv_emit_plane(ctx, config->planes[1], ETNA_PENDING_READ, VIVS_YUV_U_BASE, VIVS_YUV_U_STRIDE);
+   etna_yuv_emit_plane(ctx, config->planes[2], ETNA_PENDING_READ, VIVS_YUV_V_BASE, VIVS_YUV_V_STRIDE);
+   etna_yuv_emit_plane(ctx, config->dst, ETNA_PENDING_WRITE, VIVS_YUV_DEST_BASE, VIVS_YUV_DEST_STRIDE);
+
+   /* configure RS */
+   etna_set_state(stream, VIVS_RS_SOURCE_STRIDE, 0);
+   etna_set_state(stream, VIVS_RS_CLEAR_CONTROL, 0);
+
+   /* trigger resolve */
+   etna_set_state(stream,  VIVS_RS_KICKER, 0xbadabeeb);
+
+   /* disable yuv tiller */
+   etna_set_state(stream, VIVS_YUV_CONFIG, 0x0);
+}
+
+void
+etna_align_box_for_rs(const struct etna_screen *screen,
+                      const struct etna_resource *rsc,
+                      struct pipe_box *box)
+{
+   unsigned w_align, h_align;
+
+   etna_get_rs_alignment_mask(screen, rsc->layout, &w_align, &h_align);
+
+   box->width += box->x & w_align;
+   box->x = box->x & ~w_align;
+   box->width = align(box->width, (ETNA_RS_WIDTH_MASK + 1));
+   box->height += box->y & h_align;
+   box->y = box->y & ~h_align;
+   box->height = align(box->height, ETNA_RS_HEIGHT_MASK + 1);
+}
+
 void
 etna_clear_blit_rs_init(struct pipe_context *pctx)
 {
@@ -913,4 +956,5 @@ etna_clear_blit_rs_init(struct pipe_context *pctx)
    DBG("etnaviv: Using RS blit engine");
    pctx->clear = etna_clear_rs;
    ctx->blit = etna_try_rs_blit;
+   ctx->emit_yuv_tiler_state = etna_emit_yuv_tiler_state_rs;
 }

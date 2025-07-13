@@ -10,6 +10,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "util/macros.h"
 #include "agx_linker.h"
+#include "agx_nir_lower_gs.h"
 #include "agx_nir_lower_vbo.h"
 #include "agx_pack.h"
 #include "agx_usc.h"
@@ -23,7 +24,7 @@
 #include "shader_enums.h"
 #include "vk_pipeline_cache.h"
 
-#include "nir.h"
+#include "nir_defines.h"
 
 #include "vk_shader.h"
 
@@ -71,8 +72,7 @@ struct hk_shader_info {
       struct {
          uint32_t attribs_read;
          BITSET_DECLARE(attrib_components_read, AGX_MAX_ATTRIBS * 4);
-         uint8_t cull_distance_array_size;
-         uint8_t _pad[7];
+         uint8_t _pad[8];
       } vs;
 
       struct {
@@ -97,11 +97,7 @@ struct hk_shader_info {
          struct hk_tess_info info;
       } tess;
 
-      struct {
-         unsigned count_words;
-         enum mesa_prim out_prim;
-         uint8_t _pad[27];
-      } gs;
+      struct agx_gs_info gs;
 
       /* Used to initialize the union for other stages */
       uint8_t _pad[32];

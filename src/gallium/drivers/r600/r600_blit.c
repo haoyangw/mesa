@@ -20,7 +20,7 @@ enum r600_blitter_op /* bitmask */
 
 	R600_CLEAR         = R600_SAVE_FRAGMENT_STATE | R600_SAVE_CONST_BUF0,
 
-	R600_CLEAR_SURFACE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER,
+	R600_CLEAR_SURFACE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER | R600_SAVE_CONST_BUF0,
 
 	R600_COPY_BUFFER   = R600_DISABLE_RENDER_COND,
 
@@ -31,7 +31,9 @@ enum r600_blitter_op /* bitmask */
 
 	R600_DECOMPRESS    = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER | R600_DISABLE_RENDER_COND,
 
-	R600_COLOR_RESOLVE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER
+	R600_COLOR_RESOLVE = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER,
+
+	R600_DEPTH_STENCIL = R600_SAVE_FRAGMENT_STATE | R600_SAVE_FRAMEBUFFER
 };
 
 static void r600_blitter_begin(struct pipe_context *ctx, enum r600_blitter_op op)
@@ -63,6 +65,9 @@ static void r600_blitter_begin(struct pipe_context *ctx, enum r600_blitter_op op
 		util_blitter_save_depth_stencil_alpha(rctx->blitter, rctx->dsa_state.cso);
 		util_blitter_save_stencil_ref(rctx->blitter, &rctx->stencil_ref.pipe_state);
                 util_blitter_save_sample_mask(rctx->blitter, rctx->sample_mask.sample_mask, rctx->ps_iter_samples);
+		util_blitter_save_window_rectangles(rctx->blitter, rctx->b.window_rectangles.include,
+						    rctx->b.window_rectangles.number,
+						    rctx->b.window_rectangles.states);
 	}
 
 	if (op & R600_SAVE_CONST_BUF0) {
@@ -552,7 +557,7 @@ static void r600_clear_depth_stencil(struct pipe_context *ctx,
 {
 	struct r600_context *rctx = (struct r600_context *)ctx;
 
-	r600_blitter_begin(ctx, R600_CLEAR_SURFACE |
+	r600_blitter_begin(ctx, R600_DEPTH_STENCIL |
 			   (render_condition_enabled ? 0 : R600_DISABLE_RENDER_COND));
 	util_blitter_clear_depth_stencil(rctx->blitter, dst, clear_flags, depth, stencil,
 					 dstx, dsty, width, height);
@@ -662,7 +667,7 @@ void r600_resource_copy_region(struct pipe_context *ctx,
 	struct r600_context *rctx = (struct r600_context *)ctx;
 	struct pipe_surface *dst_view, dst_templ;
 	struct pipe_sampler_view src_templ, *src_view;
-	unsigned dst_width, dst_height, src_width0, src_height0, src_widthFL, src_heightFL;
+	unsigned src_width0, src_height0, src_widthFL, src_heightFL;
 	unsigned src_force_level = 0;
 	struct pipe_box sbox, dstbox;
 
@@ -686,8 +691,6 @@ void r600_resource_copy_region(struct pipe_context *ctx,
 		return; /* error */
 	}
 
-	dst_width = u_minify(dst->width0, dst_level);
-        dst_height = u_minify(dst->height0, dst_level);
 	src_width0 = src->width0;
 	src_height0 = src->height0;
         src_widthFL = u_minify(src->width0, src_level);
@@ -706,8 +709,6 @@ void r600_resource_copy_region(struct pipe_context *ctx,
 			src_templ.format = PIPE_FORMAT_R32G32B32A32_UINT; /* 128-bit block */
 		dst_templ.format = src_templ.format;
 
-		dst_width = util_format_get_nblocksx(dst->format, dst_width);
-		dst_height = util_format_get_nblocksy(dst->format, dst_height);
 		src_width0 = util_format_get_nblocksx(src->format, src_width0);
 		src_height0 = util_format_get_nblocksy(src->format, src_height0);
 		src_widthFL = util_format_get_nblocksx(src->format, src_widthFL);
@@ -731,7 +732,6 @@ void r600_resource_copy_region(struct pipe_context *ctx,
 			src_templ.format = PIPE_FORMAT_R8G8B8A8_UINT;
 			dst_templ.format = PIPE_FORMAT_R8G8B8A8_UINT;
 
-			dst_width = util_format_get_nblocksx(dst->format, dst_width);
 			src_width0 = util_format_get_nblocksx(src->format, src_width0);
 			src_widthFL = util_format_get_nblocksx(src->format, src_widthFL);
 
@@ -775,8 +775,7 @@ void r600_resource_copy_region(struct pipe_context *ctx,
 
 	dst_view = r600_create_surface_custom(ctx, dst, &dst_templ,
 					      /* we don't care about these two for r600g */
-					      dst->width0, dst->height0,
-					      dst_width, dst_height);
+					      dst->width0, dst->height0);
 
 	if (rctx->b.gfx_level >= EVERGREEN) {
 		src_view = evergreen_create_sampler_view_custom(ctx, src, &src_templ,

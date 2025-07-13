@@ -25,7 +25,7 @@
 #include <dlfcn.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include "gbm/main/gbm.h"
+#include <gbm.h>
 #include "drm-uapi/drm_fourcc.h"
 
 #define EGL_PLATFORM_GBM_MESA             0x31D7
@@ -590,6 +590,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(v3d)
 DEFINE_LOADER_DRM_ENTRYPOINT(vc4)
 DEFINE_LOADER_DRM_ENTRYPOINT(panfrost)
 DEFINE_LOADER_DRM_ENTRYPOINT(panthor)
+DEFINE_LOADER_DRM_ENTRYPOINT(apple)
 DEFINE_LOADER_DRM_ENTRYPOINT(asahi)
 DEFINE_LOADER_DRM_ENTRYPOINT(etnaviv)
 DEFINE_LOADER_DRM_ENTRYPOINT(tegra)

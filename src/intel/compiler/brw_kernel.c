@@ -231,13 +231,7 @@ lower_kernel_intrinsics(nir_shader *nir)
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 static const struct spirv_capabilities spirv_caps = {
@@ -319,13 +313,6 @@ brw_kernel_from_spirv(struct brw_compiler *compiler,
       fprintf(stderr, "NIR (from SPIR-V) for kernel\n");
       nir_print_shader(nir, stderr);
    }
-
-   nir_lower_printf_options printf_opts = {
-      .ptr_bit_size               = 64,
-      .max_buffer_size            = 1024 * 1024,
-      .use_printf_base_identifier = true,
-   };
-   NIR_PASS_V(nir, nir_lower_printf, &printf_opts);
 
    NIR_PASS_V(nir, implement_intel_builtins);
    NIR_PASS_V(nir, nir_link_shader_functions, spirv_options.clc_shader);

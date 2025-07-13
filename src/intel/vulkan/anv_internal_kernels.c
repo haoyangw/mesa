@@ -48,37 +48,8 @@ lower_base_workgroup_id(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
-static nir_shader *
-load_libanv(struct anv_device *device)
-{
-   uint32_t spv_size;
-   const uint32_t *spv_code = anv_genX(device->info, libanv_spv)(&spv_size);
-
-   void *mem_ctx = ralloc_context(NULL);
-
-   return brw_nir_from_spirv(mem_ctx, spv_code, spv_size);
-}
-
-static void
-link_libanv(nir_shader *nir, const nir_shader *libanv)
-{
-   nir_link_shader_functions(nir, libanv);
-   NIR_PASS_V(nir, nir_inline_functions);
-   NIR_PASS_V(nir, nir_remove_non_entrypoints);
-   NIR_PASS_V(nir, nir_lower_vars_to_explicit_types, nir_var_function_temp,
-              glsl_get_cl_type_size_align);
-   NIR_PASS_V(nir, nir_opt_deref);
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
-   NIR_PASS_V(nir, nir_lower_explicit_io,
-              nir_var_shader_temp | nir_var_function_temp | nir_var_mem_shared |
-                 nir_var_mem_global,
-              nir_address_format_62bit_generic);
-   NIR_PASS_V(nir, nir_lower_scratch_to_var);
-}
-
 static struct anv_shader_bin *
 compile_shader(struct anv_device *device,
-               const nir_shader *libanv,
                enum anv_internal_kernel_name shader_name,
                gl_shader_stage stage,
                const char *name,
@@ -97,12 +68,14 @@ compile_shader(struct anv_device *device,
 
    nir_shader *nir = b.shader;
 
-   link_libanv(nir, libanv);
-
    NIR_PASS_V(nir, nir_lower_vars_to_ssa);
    NIR_PASS_V(nir, nir_opt_cse);
    NIR_PASS_V(nir, nir_opt_gcm, true);
-   NIR_PASS_V(nir, nir_opt_peephole_select, 1, false, false);
+
+   nir_opt_peephole_select_options peephole_select_options = {
+      .limit = 1,
+   };
+   NIR_PASS_V(nir, nir_opt_peephole_select, &peephole_select_options);
 
    NIR_PASS_V(nir, nir_lower_variable_initializers, ~0);
 
@@ -349,17 +322,13 @@ anv_device_get_internal_shader(struct anv_device *device,
       return VK_SUCCESS;
    }
 
-   nir_shader *libanv_shaders = load_libanv(device);
-
    bin = compile_shader(device,
-                        libanv_shaders,
                         name,
                         internal_kernels[name].stage,
                         internal_kernels[name].key.name,
                         &internal_kernels[name].key,
                         sizeof(internal_kernels[name].key),
                         internal_kernels[name].send_count);
-   ralloc_free(libanv_shaders);
    if (bin == NULL)
       return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
                        "Unable to compiler internal kernel");

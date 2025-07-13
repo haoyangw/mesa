@@ -36,6 +36,8 @@
 #include "common/intel_tiled_render.h"
 #include "compiler/brw_prim.h"
 
+#include "genX_mi_builder.h"
+
 static const uint32_t vk_to_intel_blend[] = {
    [VK_BLEND_FACTOR_ZERO]                    = BLENDFACTOR_ZERO,
    [VK_BLEND_FACTOR_ONE]                     = BLENDFACTOR_ONE,
@@ -138,16 +140,59 @@ static const uint32_t vk_to_intel_primitive_type[] = {
    [VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY] = _3DPRIM_TRISTRIP_ADJ,
 };
 
+static uint32_t vk_to_intel_index_type(VkIndexType type)
+{
+   switch (type) {
+   case VK_INDEX_TYPE_UINT8_KHR:
+      return INDEX_BYTE;
+   case VK_INDEX_TYPE_UINT16:
+      return INDEX_WORD;
+   case VK_INDEX_TYPE_UINT32:
+      return INDEX_DWORD;
+   default:
+      unreachable("invalid index type");
+   }
+}
+
+void
+genX(batch_emit_wa_16014912113)(struct anv_batch *batch,
+                                const struct intel_urb_config *urb_cfg)
+{
+#if INTEL_NEEDS_WA_16014912113
+   if (urb_cfg->size[0] == 0)
+      return;
+
+   for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
+#if GFX_VER >= 12
+      anv_batch_emit(batch, GENX(3DSTATE_URB_ALLOC_VS), urb) {
+         urb._3DCommandSubOpcode             += i;
+         urb.VSURBEntryAllocationSize        = urb_cfg->size[i] - 1;
+         urb.VSURBStartingAddressSlice0      = urb_cfg->start[i];
+         urb.VSURBStartingAddressSliceN      = urb_cfg->start[i];
+         urb.VSNumberofURBEntriesSlice0      = i == 0 ? 256 : 0;
+         urb.VSNumberofURBEntriesSliceN      = i == 0 ? 256 : 0;
+      }
+#else
+      anv_batch_emit(batch, GENX(3DSTATE_URB_VS), urb) {
+         urb._3DCommandSubOpcode      += i;
+         urb.VSURBStartingAddress      = urb_cfg->start[i];
+         urb.VSURBEntryAllocationSize  = urb_cfg->size[i] - 1;
+         urb.VSNumberofURBEntries      = i == 0 ? 256 : 0;
+      }
+#endif
+   }
+   anv_batch_emit(batch, GENX(PIPE_CONTROL), pc) {
+      pc.HDCPipelineFlushEnable = true;
+   }
+#endif
+}
+
 static void
 genX(streamout_prologue)(struct anv_cmd_buffer *cmd_buffer)
 {
 #if INTEL_WA_16013994831_GFX_VER
    /* Wa_16013994831 - Disable preemption during streamout, enable back
     * again if XFB not used by the current pipeline.
-    *
-    * Although this workaround applies to Gfx12+, we already disable object
-    * level preemption for another reason in genX_state.c so we can skip this
-    * for Gfx12.
     */
    if (!intel_needs_workaround(cmd_buffer->device->info, 16013994831))
       return;
@@ -725,31 +770,15 @@ update_fs_msaa_flags(struct anv_gfx_dynamic_state *hw_state,
        wm_prog_data->alpha_to_coverage != INTEL_SOMETIMES)
       return;
 
-   enum intel_msaa_flags fs_msaa_flags = INTEL_MSAA_FLAG_ENABLE_DYNAMIC;
-
-   if (dyn->ms.rasterization_samples > 1) {
-      fs_msaa_flags |= INTEL_MSAA_FLAG_MULTISAMPLE_FBO;
-
-      if (wm_prog_data->sample_shading) {
-         assert(wm_prog_data->persample_dispatch != INTEL_NEVER);
-         fs_msaa_flags |= INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH;
-      }
-      if ((pipeline->sample_shading_enable &&
-           (pipeline->min_sample_shading * dyn->ms.rasterization_samples) > 1) ||
-          wm_prog_data->sample_shading) {
-         fs_msaa_flags |= INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH |
-                          INTEL_MSAA_FLAG_PERSAMPLE_INTERP;
-      }
-   }
-
-   if (wm_prog_data->coarse_pixel_dispatch == INTEL_SOMETIMES &&
-       !(fs_msaa_flags & INTEL_MSAA_FLAG_PERSAMPLE_DISPATCH)) {
-      fs_msaa_flags |= INTEL_MSAA_FLAG_COARSE_PI_MSG |
-                       INTEL_MSAA_FLAG_COARSE_RT_WRITES;
-   }
-
-   if (dyn->ms.alpha_to_coverage_enable)
-      fs_msaa_flags |= INTEL_MSAA_FLAG_ALPHA_TO_COVERAGE;
+   enum intel_msaa_flags fs_msaa_flags =
+      intel_fs_msaa_flags((struct intel_fs_params) {
+            .shader_sample_shading     = wm_prog_data->sample_shading,
+            .shader_min_sample_shading = pipeline->min_sample_shading,
+            .state_sample_shading      = pipeline->sample_shading_enable,
+            .rasterization_samples     = dyn->ms.rasterization_samples,
+            .coarse_pixel              = !vk_fragment_shading_rate_is_disabled(&dyn->fsr),
+            .alpha_to_coverage         = dyn->ms.alpha_to_coverage_enable,
+         });
 
    SET(FS_MSAA_FLAGS, fs_msaa_flags, fs_msaa_flags);
 }
@@ -857,27 +886,16 @@ update_ps_extra_has_uav(struct anv_gfx_dynamic_state *hw_state,
 {
    const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
 
-#if GFX_VERx10 >= 125
-   SET_STAGE(PS_EXTRA, ps_extra.PixelShaderHasUAV,
-                       wm_prog_data && wm_prog_data->has_side_effects,
-                       FRAGMENT);
-#else
-   /* Prior to Gfx12.5 the HW seems to avoid spawning fragment shaders even if
-    * 3DSTATE_PS_EXTRA::PixelShaderKillsPixel=true when
-    * 3DSTATE_PS_BLEND::HasWriteableRT=false. This is causing problems with
-    * occlusion queries with 0 attachments. There are no CTS tests exercising
-    * this but zink+anv fails a bunch of tests like piglit
-    * arb_framebuffer_no_attachments-query.
-    *
-    * Here we choose to tweak the PixelShaderHasUAV to make sure the fragment
-    * shaders are run properly.
+   /* Force fragment shader execution if occlusion queries are active to
+    * ensure PS_DEPTH_COUNT is correct. Otherwise a fragment shader with
+    * discard and no render target setup could be increment PS_DEPTH_COUNT if
+    * the HW internally decides to not run the shader because it has already
+    * established that depth-test is passing.
     */
    SET_STAGE(PS_EXTRA, ps_extra.PixelShaderHasUAV,
                        wm_prog_data && (wm_prog_data->has_side_effects ||
-                                        (gfx->color_att_count == 0 &&
-                                         gfx->n_occlusion_queries > 0)),
+                                        gfx->n_occlusion_queries > 0),
                        FRAGMENT);
-#endif
 }
 
 ALWAYS_INLINE static void
@@ -1302,7 +1320,7 @@ update_vf_restart(struct anv_gfx_dynamic_state *hw_state,
                   const struct anv_cmd_graphics_state *gfx)
 {
    SET(VF, vf.IndexedDrawCutIndexEnable, dyn->ia.primitive_restart_enable);
-   SET(VF, vf.CutIndex, gfx->restart_index);
+   SET(VF, vf.CutIndex, vk_index_to_restart(gfx->index_type));
 }
 
 ALWAYS_INLINE static void
@@ -1392,6 +1410,10 @@ update_blend_state(struct anv_gfx_dynamic_state *hw_state,
       SET(BLEND_STATE, blend.rts[rt].ColorClampRange, COLORCLAMP_RTFORMAT);
       SET(BLEND_STATE, blend.rts[rt].PreBlendColorClampEnable, true);
       SET(BLEND_STATE, blend.rts[rt].PostBlendColorClampEnable, true);
+
+#if GFX_VER >= 30
+      SET(BLEND_STATE, blend.rts[rt].SimpleFloatBlendEnable, true);
+#endif
 
       /* Setup blend equation. */
       SET(BLEND_STATE, blend.rts[rt].ColorBlendFunction,
@@ -1922,11 +1944,12 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_STIPPLE_ENABLE))
       update_line_stipple(hw_state, dyn);
 
-   if ((gfx->dirty & ANV_CMD_DIRTY_RESTART_INDEX) ||
+   if ((gfx->dirty & ANV_CMD_DIRTY_INDEX_TYPE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE))
       update_vf_restart(hw_state, dyn, gfx);
 
-   if (gfx->dirty & ANV_CMD_DIRTY_INDEX_BUFFER)
+   if ((gfx->dirty & ANV_CMD_DIRTY_INDEX_BUFFER) ||
+       (gfx->dirty & ANV_CMD_DIRTY_INDEX_TYPE))
       BITSET_SET(hw_state->dirty, ANV_GFX_STATE_INDEX_BUFFER);
 
 #if GFX_VERx10 >= 125
@@ -2036,7 +2059,8 @@ emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
       vfg.DistributionMode = RR_STRICT;
    }
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF), vf) {
-      vf.GeometryDistributionEnable = true;
+      vf.GeometryDistributionEnable =
+         cmd_buffer->device->physical->instance->enable_vf_distribution;
    }
 #endif
 
@@ -2123,6 +2147,7 @@ static void
 cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_device *device = cmd_buffer->device;
+   struct anv_instance *instance = device->physical->instance;
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
    struct anv_graphics_pipeline *pipeline =
       anv_pipeline_to_graphics(gfx->base.pipeline);
@@ -2133,6 +2158,23 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    struct anv_gfx_dynamic_state *hw_state = &gfx->dyn_state;
    const bool protected = cmd_buffer->vk.pool->flags &
                           VK_COMMAND_POOL_CREATE_PROTECTED_BIT;
+
+#define DEBUG_SHADER_HASH(stage) do {                                   \
+      if (unlikely(                                                     \
+             (instance->debug & ANV_DEBUG_SHADER_HASH) &&               \
+             anv_pipeline_has_stage(pipeline, stage))) {                \
+         mi_store(&b,                                                   \
+                  mi_mem32(device->workaround_address),                 \
+                  mi_imm(pipeline->base.shaders[stage]->                \
+                         prog_data->source_hash));                      \
+      }                                                                 \
+   } while (0)
+
+   struct mi_builder b;
+   if (unlikely(instance->debug & ANV_DEBUG_SHADER_HASH)) {
+      mi_builder_init(&b, device->info, &cmd_buffer->batch);
+      mi_builder_set_mocs(&b, isl_mocs(&device->isl_dev, 0, false));
+   }
 
 #if INTEL_WA_16011107343_GFX_VER
    /* Will be emitted in front of every draw instead */
@@ -2165,8 +2207,10 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_URB)) {
-      genX(urb_workaround)(cmd_buffer, &pipeline->urb_cfg);
-
+      if (genX(need_wa_16014912113)(&gfx->urb_cfg, &pipeline->urb_cfg)) {
+         genX(batch_emit_wa_16014912113)(&cmd_buffer->batch,
+                                         &gfx->urb_cfg);
+      }
       anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline, final.urb);
 
       memcpy(&gfx->urb_cfg, &pipeline->urb_cfg,
@@ -2187,17 +2231,26 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline, final.vf_sgvs_2);
 #endif
 
+   if (device->physical->instance->vf_component_packing &&
+       BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF_COMPONENT_PACKING)) {
+      anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline,
+                                    final.vf_component_packing);
+   }
+
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VS)) {
+      DEBUG_SHADER_HASH(MESA_SHADER_VERTEX);
       anv_batch_emit_pipeline_state_protected(&cmd_buffer->batch, pipeline,
                                               final.vs, protected);
    }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_HS)) {
+      DEBUG_SHADER_HASH(MESA_SHADER_TESS_CTRL);
       anv_batch_emit_pipeline_state_protected(&cmd_buffer->batch, pipeline,
                                               final.hs, protected);
    }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_DS)) {
+      DEBUG_SHADER_HASH(MESA_SHADER_TESS_EVAL);
       anv_batch_emit_pipeline_state_protected(&cmd_buffer->batch, pipeline,
                                               final.ds, protected);
    }
@@ -2290,6 +2343,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    /* Now the potentially dynamic instructions */
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_PS)) {
+      DEBUG_SHADER_HASH(MESA_SHADER_FRAGMENT);
       anv_batch_emit_merge_protected(&cmd_buffer->batch, GENX(3DSTATE_PS),
                                      pipeline, partial.ps, ps, protected) {
          SET(ps, ps, KernelStartPointer0);
@@ -2475,6 +2529,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_GS)) {
+      DEBUG_SHADER_HASH(MESA_SHADER_GEOMETRY);
       anv_batch_emit_merge_protected(&cmd_buffer->batch, GENX(3DSTATE_GS),
                                      pipeline, partial.gs, gs, protected) {
          SET(gs, gs, ReorderMode);
@@ -2671,28 +2726,27 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF)) {
       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF), vf) {
 #if GFX_VERx10 >= 125
-         vf.GeometryDistributionEnable = true;
+         vf.GeometryDistributionEnable =
+            device->physical->instance->enable_vf_distribution;
 #endif
+         vf.ComponentPackingEnable =
+            device->physical->instance->vf_component_packing;
          SET(vf, vf, IndexedDrawCutIndexEnable);
          SET(vf, vf, CutIndex);
       }
    }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_INDEX_BUFFER)) {
-      struct anv_buffer *buffer = gfx->index_buffer;
-      uint32_t offset = gfx->index_offset;
       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_INDEX_BUFFER), ib) {
-         ib.IndexFormat           = gfx->index_type;
-         ib.MOCS                  = anv_mocs(device,
-                                             buffer ? buffer->address.bo : NULL,
-                                             ISL_SURF_USAGE_INDEX_BUFFER_BIT);
+         ib.IndexFormat           = vk_to_intel_index_type(gfx->index_type);
+         ib.MOCS                  = gfx->index_addr == 0 ?
+            anv_mocs(cmd_buffer->device, NULL, ISL_SURF_USAGE_INDEX_BUFFER_BIT) :
+            gfx->index_mocs;
 #if GFX_VER >= 12
          ib.L3BypassDisable       = true;
 #endif
-         if (buffer) {
-            ib.BufferStartingAddress = anv_address_add(buffer->address, offset);
-            ib.BufferSize            = gfx->index_size;
-         }
+         ib.BufferStartingAddress = anv_address_from_u64(gfx->index_addr);
+         ib.BufferSize            = gfx->index_size;
       }
    }
 
@@ -2763,6 +2817,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
             INIT(blend.rts[i], LogicOpEnable),
             INIT(blend.rts[i], ColorBufferBlendEnable),
             INIT(blend.rts[i], ColorClampRange),
+#if GFX_VER >= 30
+            INIT(blend.rts[i], SimpleFloatBlendEnable),
+#endif
             INIT(blend.rts[i], PreBlendColorClampEnable),
             INIT(blend.rts[i], PostBlendColorClampEnable),
             INIT(blend.rts[i], SourceBlendFactor),
@@ -2823,6 +2880,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
 
 #undef INIT
 #undef SET
+#undef DEBUG_SHADER_HASH
 
    BITSET_ZERO(hw_state->dirty);
 }

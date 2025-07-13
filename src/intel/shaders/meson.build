@@ -36,14 +36,14 @@ intel_shaders_gens = [ [ 80,   8],
                        [200,  20],
                        [300,  30] ]
 intel_shaders = []
+intel_shaders_headers = []
 foreach gen : intel_shaders_gens
   intel_shaders_spv = custom_target(
     input : intel_shader_files,
     output : 'intel_gfx@0@_shaders.spv'.format(gen[0]),
     command : [
       prog_mesa_clc,
-      intel_shader_files, '-o', '@OUTPUT@', '--',
-      '-DNDEBUG=1',
+      intel_shader_files, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@', '--',
       '-DGFX_VERx10=@0@'.format(gen[0]),
       '-I' + join_paths(meson.current_source_dir(), '.'),
       '-I' + join_paths(dir_source_root, 'src/compiler/libcl'),
@@ -51,27 +51,31 @@ foreach gen : intel_shaders_gens
       '-I' + join_paths(dir_source_root, 'src/intel'),
       '-I' + join_paths(meson.project_build_root(), 'src/intel'),
       '-I' + join_paths(dir_source_root, 'src/intel/genxml'),
+      cl_args,
     ],
     depends : [gen_cl_xml_pack, intel_dev_wa_src],
+    depfile : 'intel_gfx@0@_shaders.spv.d'.format(gen[0]),
   )
 
-  intel_shaders += custom_target(
-    input : ['spv2hex.py', intel_shaders_spv],
-    output : 'intel_gfx@0@_shaders_spv.h'.format(gen[0]),
-    command : [
-      prog_python, '@INPUT@', '--output', '@OUTPUT@',
-      '--prefix', 'gfx@0@_shaders_spv'.format(gen[1]),
-    ],
-  )
-
-  intel_shaders += custom_target(
+  _intel_shaders = custom_target(
     input : intel_shaders_spv,
-    output : 'intel_gfx@0@_shaders_binding.h'.format(gen[0]),
-    command : [prog_vtn_bindgen, intel_shaders_spv, '@OUTPUT@'],
+    output : ['intel_gfx@0@_shaders_binding.cpp'.format(gen[0]),
+              'intel_gfx@0@_shaders_binding.h'.format(gen[0])],
+    command : [prog_vtn_bindgen2, intel_shaders_spv, '@OUTPUT0@', '@OUTPUT1@'],
   )
+
+  intel_shaders += _intel_shaders
+  intel_shaders_headers += _intel_shaders[1]
 endforeach
 
+libintel_shaders = static_library(
+  'intel_shaders',
+  intel_shaders,
+  dependencies : idep_nir,
+)
+
 idep_intel_shaders = declare_dependency(
-  sources : intel_shaders,
+  link_with : libintel_shaders,
+  sources : intel_shaders_headers,
   include_directories : include_directories('.'),
 )

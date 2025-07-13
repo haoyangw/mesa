@@ -116,6 +116,9 @@ struct elk_compiler {
     */
    bool indirect_ubos_use_sampler;
 
+   /** Whether we have an original 965G/GM clipping bug */
+   bool has_negative_rhw_bug;
+
    /**
     * Calling the ra_allocate function after each register spill can take
     * several minutes. This option speeds up shader compilation by spilling
@@ -241,11 +244,11 @@ struct elk_base_prog_key {
 /**
  * OpenGL attribute slots fall in [0, VERT_ATTRIB_MAX - 1] with the range
  * [VERT_ATTRIB_GENERIC0, VERT_ATTRIB_MAX - 1] reserved for up to 16 user
- * input vertex attributes. In Vulkan, we expose up to 28 user vertex input
+ * input vertex attributes. In Vulkan, we expose up to 29 user vertex input
  * attributes that are mapped to slots also starting at VERT_ATTRIB_GENERIC0.
  */
 #define MAX_GL_VERT_ATTRIB     VERT_ATTRIB_MAX
-#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 28)
+#define MAX_VK_VERT_ATTRIB     (VERT_ATTRIB_GENERIC0 + 29)
 
 /**
  * Max number of binding table entries used for stream output.
@@ -314,7 +317,7 @@ struct elk_vs_prog_key {
     */
    unsigned nr_userclip_plane_consts:4;
 
-   uint32_t padding: 25;
+   uint32_t padding: 17;
 };
 
 /** The program key for Tessellation Control Shaders. */

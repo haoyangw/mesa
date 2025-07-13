@@ -3,10 +3,10 @@
 
 es2_glapi_mapi_tmp_h = custom_target(
   'es2_glapi_mapi_tmp.h',
-  input : [glapi_gen_mapi_py, glapi_gen_gl_xml],
-  output : 'glapi_mapi_tmp.h',
+  input : ['../new/gen_gldispatch_mapi.py', '../glapi/registry/gl.xml'],
+  output : 'es2_glapi_mapi_tmp.h',
   command : [prog_python, '@INPUT0@', 'glesv2', '@INPUT1@'],
-  depend_files : glapi_gen_mapi_deps,
+  depend_files : glapi_xml_py_deps,
   capture : true,
 )
 
@@ -24,13 +24,11 @@ gles2_def = custom_target(
 
 libgles2 = shared_library(
   'GLESv2' + get_option('gles-lib-suffix'),
-  ['../entry.c', es2_glapi_mapi_tmp_h],
+  ['libgles2_public.c', es2_glapi_mapi_tmp_h],
   vs_module_defs : gles2_def,
   c_args : [
     c_msvc_compat_args,
     _es2_c_args,
-    '-DMAPI_MODE_BRIDGE',
-    '-DMAPI_ABI_HEADER="@0@"'.format(es2_glapi_mapi_tmp_h.full_path()),
     gcc_lto_quirk,
   ],
   gnu_symbol_visibility : 'hidden',

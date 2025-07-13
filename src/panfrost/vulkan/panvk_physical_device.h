@@ -34,6 +34,16 @@ struct panvk_physical_device {
 
    const struct panfrost_model *model;
 
+   union {
+      struct {
+         struct {
+            uint32_t chunk_size;
+            uint32_t initial_chunks;
+            uint32_t max_chunks;
+         } tiler;
+      } csf;
+   };
+
    struct {
       dev_t primary_rdev;
       dev_t render_rdev;
@@ -52,6 +62,9 @@ struct panvk_physical_device {
    const struct vk_sync_type *sync_types[3];
 
    struct wsi_device wsi_device;
+
+   uint64_t compute_core_mask;
+   uint64_t fragment_core_mask;
 };
 
 VK_DEFINE_HANDLE_CASTS(panvk_physical_device, vk.base, VkPhysicalDevice,

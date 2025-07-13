@@ -30,7 +30,8 @@ nvk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
    if (unlikely(result != VK_SUCCESS))
       return result;
 
-   buffer->addr = addr;
+   assert(buffer->vk.device_address == 0);
+   buffer->vk.device_address = addr;
 
    return VK_SUCCESS;
 }
@@ -38,7 +39,7 @@ nvk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
 VkResult
 nvk_device_init_meta(struct nvk_device *dev)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    VkResult result = vk_meta_device_init(&dev->vk, &dev->meta);
    if (result != VK_SUCCESS)

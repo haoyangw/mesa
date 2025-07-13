@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
+#include "brw_analysis.h"
 #include "brw_builder.h"
-#include "brw_fs_live_variables.h"
 #include "brw_generator.h"
 #include "brw_nir.h"
 #include "brw_cfg.h"
@@ -16,8 +16,6 @@
 #include "dev/intel_wa.h"
 
 #include <memory>
-
-using namespace brw;
 
 static void
 fill_push_const_block_info(struct brw_push_const_block *block, unsigned dwords)
@@ -61,21 +59,13 @@ cs_fill_push_const_info(const struct intel_device_info *devinfo,
 }
 
 static bool
-run_cs(fs_visitor &s, bool allow_spilling)
+run_cs(brw_shader &s, bool allow_spilling)
 {
    assert(gl_shader_stage_is_compute(s.stage));
-   const brw_builder bld = brw_builder(&s).at_end();
 
-   s.payload_ = new cs_thread_payload(s);
+   s.payload_ = new brw_cs_thread_payload(s);
 
-   if (s.devinfo->platform == INTEL_PLATFORM_HSW && s.prog_data->total_shared > 0) {
-      /* Move SLM index from g0.0[27:24] to sr0.1[11:8] */
-      const brw_builder abld = bld.exec_all().group(1, 0);
-      abld.MOV(retype(brw_sr0_reg(1), BRW_TYPE_UW),
-               suboffset(retype(brw_vec1_grf(0, 0), BRW_TYPE_UW), 1));
-   }
-
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (s.failed)
       return false;
@@ -143,11 +133,9 @@ brw_compile_cs(const struct brw_compiler *compiler,
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_CS);
 
-   prog_data->base.stage = MESA_SHADER_COMPUTE;
-   prog_data->base.total_shared = nir->info.shared_size;
-   prog_data->base.ray_queries = nir->info.ray_queries;
-   prog_data->base.total_scratch = 0;
-   prog_data->uses_inline_data = brw_nir_uses_inline_data(nir);
+   brw_prog_data_init(&prog_data->base, &params->base);
+   prog_data->uses_inline_data = brw_nir_uses_inline_data(nir) ||
+                                 key->base.uses_inline_push_addr;
    assert(compiler->devinfo->verx10 >= 125 || !prog_data->uses_inline_data);
 
    if (!nir->info.workgroup_size_variable) {
@@ -164,7 +152,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
 
    prog_data->uses_sampler = brw_nir_uses_sampler(params->base.nir);
 
-   std::unique_ptr<fs_visitor> v[3];
+   std::unique_ptr<brw_shader> v[3];
 
    for (unsigned i = 0; i < 3; i++) {
       const unsigned simd = devinfo->ver >= 30 ? 2 - i : i;
@@ -187,7 +175,7 @@ brw_compile_cs(const struct brw_compiler *compiler,
       brw_postprocess_nir(shader, compiler, debug_enabled,
                           key->base.robust_flags);
 
-      v[simd] = std::make_unique<fs_visitor>(compiler, &params->base,
+      v[simd] = std::make_unique<brw_shader>(compiler, &params->base,
                                              &key->base,
                                              &prog_data->base,
                                              shader, dispatch_width,

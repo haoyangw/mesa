@@ -10,6 +10,7 @@ use crate::impl_cl_type_trait;
 use mesa_rust::compiler::clc::*;
 use mesa_rust::compiler::nir::*;
 use mesa_rust::nir_pass;
+use mesa_rust::pipe::context::PipeContext;
 use mesa_rust::pipe::context::RWFlags;
 use mesa_rust::pipe::resource::*;
 use mesa_rust::pipe::screen::ResourceType;
@@ -342,13 +343,18 @@ pub struct KernelInfo {
     num_subgroups: usize,
 }
 
-struct CSOWrapper {
+/// Wraps around a compute state object which is safe to share between pipe_contexts.
+pub struct SharedCSOWrapper {
     cso_ptr: *mut c_void,
     dev: &'static Device,
 }
 
-impl CSOWrapper {
-    fn new(dev: &'static Device, nir: &NirShader) -> Self {
+impl SharedCSOWrapper {
+    /// # Safety
+    ///
+    /// The returned value is only safe to be executed on a pipe_context when the device supports
+    /// shareable shaders.
+    unsafe fn new(dev: &'static Device, nir: &NirShader) -> Self {
         let cso_ptr = dev
             .helper_ctx()
             .create_compute_state(nir, nir.shared_size());
@@ -359,24 +365,34 @@ impl CSOWrapper {
         }
     }
 
+    /// # Safety
+    ///
+    /// `self` needs to live until another CSOWrapper is bound to `ctx`
+    pub unsafe fn bind_to_ctx(&self, ctx: &PipeContext) {
+        // SAFETY: We make it the callers responsibility to uphold the safety requirements.
+        unsafe {
+            ctx.bind_compute_state(self.cso_ptr);
+        }
+    }
+
     fn get_cso_info(&self) -> pipe_compute_state_object_info {
         self.dev.helper_ctx().compute_state_info(self.cso_ptr)
     }
 }
 
-impl Drop for CSOWrapper {
+impl Drop for SharedCSOWrapper {
     fn drop(&mut self) {
         self.dev.helper_ctx().delete_compute_state(self.cso_ptr);
     }
 }
 
-enum KernelDevStateVariant {
-    Cso(CSOWrapper),
+pub enum KernelDevStateVariant {
+    Cso(SharedCSOWrapper),
     Nir(NirShader),
 }
 
-#[derive(Debug, PartialEq)]
-enum NirKernelVariant {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NirKernelVariant {
     /// Can be used under any circumstance.
     Default,
 
@@ -431,7 +447,7 @@ impl NirKernelBuilds {
     }
 }
 
-struct NirKernelBuild {
+pub struct NirKernelBuild {
     nir_or_cso: KernelDevStateVariant,
     constant_buffer: Option<Arc<PipeResource>>,
     info: pipe_compute_state_object_info,
@@ -447,7 +463,9 @@ unsafe impl Sync for NirKernelBuild {}
 
 impl NirKernelBuild {
     fn new(dev: &'static Device, mut out: CompilationResult) -> Self {
-        let cso = CSOWrapper::new(dev, &out.nir);
+        // SAFETY: we only use the cso when dev supports shareable shaders, otherwise we just
+        //         extract some info and throw it away, which is safe.
+        let cso = unsafe { SharedCSOWrapper::new(dev, &out.nir) };
         let info = cso.get_cso_info();
         let cb = Self::create_nir_constant_buffer(dev, &out.nir);
         let shared_size = out.nir.shared_size() as u64;
@@ -488,6 +506,10 @@ impl NirKernelBuild {
         } else {
             None
         }
+    }
+
+    pub fn nir_or_cso(&self) -> &KernelDevStateVariant {
+        &self.nir_or_cso
     }
 }
 
@@ -588,7 +610,13 @@ fn opt_nir(nir: &mut NirShader, dev: &Device, has_explicit_types: bool) {
         progress |= nir_pass!(nir, nir_opt_dead_cf);
         progress |= nir_pass!(nir, nir_opt_remove_phis);
         // we don't want to be too aggressive here, but it kills a bit of CFG
-        progress |= nir_pass!(nir, nir_opt_peephole_select, 8, true, true);
+        let peephole_select_options = nir_opt_peephole_select_options {
+            limit: 8,
+            indirect_load_ok: true,
+            expensive_alu_ok: true,
+            discard_ok: false,
+        };
+        progress |= nir_pass!(nir, nir_opt_peephole_select, &peephole_select_options);
         progress |= nir_pass!(
             nir,
             nir_lower_vec3_to_vec4,
@@ -669,7 +697,6 @@ fn compile_nir_to_args(
 
     let printf_opts = nir_lower_printf_options {
         ptr_bit_size: 0,
-        use_printf_base_identifier: false,
         hash_format_strings: false,
         max_buffer_size: dev.printf_buffer_size() as u32,
     };
@@ -1324,14 +1351,7 @@ impl Kernel {
         self.optimize_local_size(q.device, &mut grid, &mut block);
 
         Ok(Box::new(move |q, ctx| {
-            let hw_max_grid: Vec<usize> = q
-                .device
-                .max_grid_size()
-                .into_iter()
-                .map(|val| val.try_into().unwrap_or(usize::MAX))
-                // clamped as pipe_launch_grid::grid is only u32
-                .map(|val| cmp::min(val, u32::MAX as usize))
-                .collect();
+            let hw_max_grid: Vec<usize> = q.device.max_grid_size();
 
             let variant = if offsets == [0; 3]
                 && grid[0] <= hw_max_grid[0]
@@ -1553,17 +1573,8 @@ impl Kernel {
                 globals.push(unsafe { input.as_mut_ptr().byte_add(offset) }.cast());
             }
 
-            let temp_cso;
-            let cso = match &nir_kernel_build.nir_or_cso {
-                KernelDevStateVariant::Cso(cso) => cso,
-                KernelDevStateVariant::Nir(nir) => {
-                    temp_cso = CSOWrapper::new(q.device, nir);
-                    &temp_cso
-                }
-            };
-
             let sviews_len = sviews.len();
-            ctx.bind_compute_state(cso.cso_ptr);
+            ctx.bind_kernel(&nir_kernel_builds, variant)?;
             ctx.bind_sampler_states(&samplers);
             ctx.set_sampler_views(sviews);
             ctx.set_shader_images(&iviews);
@@ -1604,11 +1615,8 @@ impl Kernel {
             }
 
             ctx.clear_global_binding(globals.len() as u32);
-            ctx.clear_shader_images(iviews.len() as u32);
             ctx.clear_sampler_views(sviews_len as u32);
             ctx.clear_sampler_states(samplers.len() as u32);
-
-            ctx.bind_compute_state(ptr::null_mut());
 
             ctx.memory_barrier(PIPE_BARRIER_GLOBAL_BUFFER);
 

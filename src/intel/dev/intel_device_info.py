@@ -270,7 +270,6 @@ Struct("intel_device_info",
         Member("uint8_t", "pci_revision_id"),
         Member("intel_platform", "platform", compiler_field=True),
         Member("bool", "has_hiz_and_separate_stencil"),
-        Member("bool", "must_use_separate_stencil"),
         Member("bool", "has_sample_with_hiz"),
         Member("bool", "has_bit6_swizzle"),
         Member("bool", "has_llc"),
@@ -278,9 +277,9 @@ Struct("intel_device_info",
         Member("bool", "has_64bit_float", compiler_field=True),
         Member("bool", "has_64bit_float_via_math_pipe", compiler_field=True),
         Member("bool", "has_64bit_int", compiler_field=True),
+        Member("bool", "has_bfloat16", compiler_field=True),
         Member("bool", "has_integer_dword_mul", compiler_field=True),
-        Member("bool", "has_compr4", compiler_field=True),
-        Member("bool", "has_surface_tile_offset"),
+        Member("bool", "has_systolic", compiler_field=True),
         Member("bool", "supports_simd16_3src", compiler_field=True),
         Member("bool", "disable_ccs_repack"),
 
@@ -305,8 +304,6 @@ Struct("intel_device_info",
         Member("bool", "has_context_isolation"),
         Member("bool", "has_set_pat_uapi"),
         Member("bool", "has_indirect_unroll"),
-        Member("bool", "has_negative_rhw_bug", compiler_field=True,
-               comment="Intel hardware quirks"),
 
         Member("bool", "has_coarse_pixel_primitive_and_cb", compiler_field=True,
                comment=dedent("""\
@@ -315,22 +312,12 @@ Struct("intel_device_info",
 
         Member("bool", "has_compute_engine", comment="Whether this platform has compute engine"),
 
-        Member("bool", "needs_unlit_centroid_workaround", compiler_field=True,
-               comment=dedent("""\
-               Some versions of Gen hardware don't do centroid interpolation correctly
-               on unlit pixels, causing incorrect values for derivatives near triangle
-               edges.  Enabling this flag causes the fragment shader to use
-               non-centroid interpolation for unlit pixels, at the expense of two extra
-               fragment shader instructions.""")),
-
         Member("bool", "needs_null_push_constant_tbimr_workaround",
                comment=dedent("""\
                Whether the platform needs an undocumented workaround for a hardware bug
                that affects draw calls with a pixel shader that has 0 push constant cycles
                when TBIMR is enabled, which has been seen to lead to hangs.  To avoid the
                issue we simply pad the push constant payload to be at least 1 register.""")),
-
-        Member("bool", "is_adl_n", comment="We need this for ADL-N specific Wa_14014966230."),
 
         Member("unsigned", "num_slices",
                comment=dedent("""\
@@ -447,7 +434,8 @@ Struct("intel_device_info",
 
         Member("unsigned", "max_cs_threads",
                comment=dedent("""\
-               Maximum Compute Shader threads.
+               Maximum Compute Shader threads per subslice.
+               Actual maximum compute shader threads is max_cs_threads * subslices.
 
                Thread count * number of EUs per subslice""")),
 

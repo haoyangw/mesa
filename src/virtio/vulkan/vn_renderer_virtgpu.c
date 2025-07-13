@@ -20,11 +20,11 @@
 #endif
 
 #include "drm-uapi/virtgpu_drm.h"
+#include "util/os_file.h"
 #include "util/sparse_array.h"
-#define VIRGL_RENDERER_UNSTABLE_APIS
-#include "virtio-gpu/virglrenderer_hw.h"
 
 #include "vn_renderer_internal.h"
+#include "virtio/virtio-gpu/venus_hw.h"
 
 #ifndef VIRTGPU_PARAM_GUEST_VRAM
 /* All guest allocations happen via virtgpu dedicated heap. */
@@ -96,7 +96,7 @@ struct virtgpu {
    uint32_t max_timeline_count;
 
    struct {
-      enum virgl_renderer_capset id;
+      uint32_t id;
       uint32_t version;
       struct virgl_renderer_capset_venus data;
    } capset;
@@ -345,7 +345,7 @@ sim_syncobj_submit(struct virtgpu *gpu,
    if (!syncobj)
       return -1;
 
-   int pending_fd = dup(sync_fd);
+   int pending_fd = os_dupfd_cloexec(sync_fd);
    if (pending_fd < 0) {
       vn_log(gpu->instance, "failed to dup sync fd");
       return -1;
@@ -440,9 +440,9 @@ sim_syncobj_export(struct virtgpu *gpu, uint32_t syncobj_handle)
    int fd = -1;
    mtx_lock(&syncobj->mutex);
    if (syncobj->pending_fd >= 0)
-      fd = dup(syncobj->pending_fd);
+      fd = os_dupfd_cloexec(syncobj->pending_fd);
    else
-      fd = dup(sim.signaled_fd);
+      fd = os_dupfd_cloexec(sim.signaled_fd);
    mtx_unlock(&syncobj->mutex);
 
    return fd;
@@ -581,7 +581,7 @@ virtgpu_ioctl_getparam(struct virtgpu *gpu, uint64_t param)
 
 static int
 virtgpu_ioctl_get_caps(struct virtgpu *gpu,
-                       enum virgl_renderer_capset id,
+                       uint32_t id,
                        uint32_t version,
                        void *capset,
                        size_t capset_size)
@@ -598,7 +598,7 @@ virtgpu_ioctl_get_caps(struct virtgpu *gpu,
 
 static int
 virtgpu_ioctl_context_init(struct virtgpu *gpu,
-                           enum virgl_renderer_capset capset_id)
+                           uint32_t capset_id)
 {
    struct drm_virtgpu_context_set_param ctx_set_params[3] = {
       {
@@ -1476,7 +1476,7 @@ virtgpu_init_context(struct virtgpu *gpu)
 static VkResult
 virtgpu_init_capset(struct virtgpu *gpu)
 {
-   gpu->capset.id = VIRGL_RENDERER_CAPSET_VENUS;
+   gpu->capset.id = VIRTGPU_DRM_CAPSET_VENUS;
    gpu->capset.version = 0;
 
    const int ret =

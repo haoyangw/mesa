@@ -32,6 +32,19 @@
 #include "util/bitset.h"
 #include "util/u_dynarray.h"
 
+/* Before Avalon, RUN_IDVS could use a selector but as we only hardcode the same
+ * configuration, we match v12+ naming here */
+
+#if PAN_ARCH <= 11
+#define MALI_IDVS_SR_VERTEX_SRT      MALI_IDVS_SR_SRT_0
+#define MALI_IDVS_SR_FRAGMENT_SRT    MALI_IDVS_SR_SRT_2
+#define MALI_IDVS_SR_VERTEX_FAU      MALI_IDVS_SR_FAU_0
+#define MALI_IDVS_SR_FRAGMENT_FAU    MALI_IDVS_SR_FAU_2
+#define MALI_IDVS_SR_VERTEX_POS_SPD  MALI_IDVS_SR_SPD_0
+#define MALI_IDVS_SR_VERTEX_VARY_SPD MALI_IDVS_SR_SPD_1
+#define MALI_IDVS_SR_FRAGMENT_SPD    MALI_IDVS_SR_SPD_2
+#endif
+
 /*
  * cs_builder implements a builder for CSF command streams. It manages the
  * allocation and overflow behaviour of queues and provides helpers for emitting
@@ -159,6 +172,19 @@ struct cs_if_else {
    struct cs_label end_label;
 };
 
+struct cs_maybe {
+   /* Link to the next pending cs_maybe for the block stack */
+   struct cs_maybe *next_pending;
+   /* Position of patch block relative to blocks.instrs */
+   uint32_t patch_pos;
+
+   /* CPU address of patch block in the chunk */
+   uint64_t *patch_addr;
+   /* Original contents of the patch block, before replacing with NOPs */
+   uint32_t num_instrs;
+   uint64_t instrs[];
+};
+
 struct cs_builder {
    /* CS builder configuration */
    struct cs_builder_conf conf;
@@ -172,6 +198,9 @@ struct cs_builder {
    /* Current CS chunk. */
    struct cs_chunk cur_chunk;
 
+   /* ralloc context used for cs_maybe allocations */
+   void *maybe_ctx;
+
    /* Temporary storage for inner blocks that need to be built
     * and copied in one monolithic sequence of instructions with no
     * jump in the middle.
@@ -180,6 +209,8 @@ struct cs_builder {
       struct cs_block *stack;
       struct util_dynarray instrs;
       struct cs_if_else pending_if;
+      /* Linked list of cs_maybe that were emitted inside the current stack */
+      struct cs_maybe *pending_maybes;
       unsigned last_load_ip_target;
    } blocks;
 
@@ -416,6 +447,13 @@ cs_reg64(struct cs_builder *b, unsigned reg)
    return cs_reg_tuple(b, reg, 2);
 }
 
+#define cs_sr_reg_tuple(__b, __cmd, __name, __size)                            \
+   cs_reg_tuple((__b), MALI_##__cmd##_SR_##__name, (__size))
+#define cs_sr_reg32(__b, __cmd, __name)                                        \
+   cs_reg32((__b), MALI_##__cmd##_SR_##__name)
+#define cs_sr_reg64(__b, __cmd, __name)                                        \
+   cs_reg64((__b), MALI_##__cmd##_SR_##__name)
+
 /*
  * The top of the register file is reserved for cs_builder internal use. We
  * need 3 spare registers for handling command queue overflow. These are
@@ -495,7 +533,7 @@ cs_reserve_instrs(struct cs_builder *b, uint32_t num_instrs)
 
       uint64_t *ptr = b->cur_chunk.buffer.cpu + (b->cur_chunk.pos++);
 
-      pan_cast_and_pack(ptr, CS_MOVE, I) {
+      pan_cast_and_pack(ptr, CS_MOVE48, I) {
          I.destination = cs_overflow_address_reg(b);
          I.immediate = newbuf.gpu;
       }
@@ -565,6 +603,14 @@ cs_flush_block_instrs(struct cs_builder *b)
    void *buffer = cs_alloc_ins_block(b, num_instrs);
 
    if (likely(buffer != NULL)) {
+      /* We wait until block instrs are copied to the chunk buffer to calculate
+       * patch_addr, in case we end up allocating a new chunk */
+      while (b->blocks.pending_maybes) {
+         b->blocks.pending_maybes->patch_addr =
+            (uint64_t *) buffer + b->blocks.pending_maybes->patch_pos;
+         b->blocks.pending_maybes = b->blocks.pending_maybes->next_pending;
+      }
+
       /* If we have a LOAD_IP chain, we need to patch each LOAD_IP
        * instruction before we copy the block to the final memory
        * region. */
@@ -673,6 +719,7 @@ cs_finish(struct cs_builder *b)
    memset(&b->cur_chunk, 0, sizeof(b->cur_chunk));
 
    util_dynarray_fini(&b->blocks.instrs);
+   ralloc_free(b->maybe_ctx);
 }
 
 /*
@@ -728,8 +775,15 @@ cs_instr_is_asynchronous(enum mali_cs_opcode opcode, uint16_t wait_mask)
    case MALI_CS_OPCODE_RUN_COMPUTE_INDIRECT:
    case MALI_CS_OPCODE_RUN_FRAGMENT:
    case MALI_CS_OPCODE_RUN_FULLSCREEN:
+#if PAN_ARCH >= 12
+   case MALI_CS_OPCODE_RUN_IDVS2:
+#else
    case MALI_CS_OPCODE_RUN_IDVS:
+#if PAN_ARCH == 10
    case MALI_CS_OPCODE_RUN_TILING:
+#endif
+#endif
+
       /* Always asynchronous. */
       return true;
 
@@ -741,6 +795,9 @@ cs_instr_is_asynchronous(enum mali_cs_opcode opcode, uint16_t wait_mask)
    case MALI_CS_OPCODE_STORE_STATE:
    case MALI_CS_OPCODE_TRACE_POINT:
    case MALI_CS_OPCODE_HEAP_OPERATION:
+#if PAN_ARCH >= 11
+   case MALI_CS_OPCODE_SHARED_SB_INC:
+#endif
       /* Asynchronous only if wait_mask != 0. */
       return wait_mask != 0;
 
@@ -771,7 +828,7 @@ cs_move32_to(struct cs_builder *b, struct cs_index dest, unsigned imm)
 static inline void
 cs_move48_to(struct cs_builder *b, struct cs_index dest, uint64_t imm)
 {
-   cs_emit(b, MOVE, I) {
+   cs_emit(b, MOVE48, I) {
       I.destination = cs_dst64(b, dest);
       I.immediate = imm;
    }
@@ -1065,6 +1122,79 @@ cs_while_end(struct cs_builder *b, struct cs_loop *loop)
 #define cs_break(__b)                                                          \
    cs_loop_conditional_break(__b, __loop, MALI_CS_CONDITION_ALWAYS, cs_undef())
 
+/* cs_maybe is an abstraction for retroactively patching cs contents. When the
+ * block is closed, its original contents are recorded and then replaced with
+ * NOP instructions. The caller can then use the cs_patch_maybe to restore the
+ * original contents at a later point. This can be useful in situations where
+ * not enough information is available during recording to determine what
+ * instructions should be emitted at the time, but it will be known at some
+ * point before submission. */
+
+struct cs_maybe_state {
+   struct cs_block block;
+   uint32_t patch_pos;
+};
+
+static inline struct cs_maybe_state *
+cs_maybe_start(struct cs_builder *b, struct cs_maybe_state *state)
+{
+   cs_block_start(b, &state->block);
+   state->patch_pos = cs_block_next_pos(b);
+   return state;
+}
+
+static inline void
+cs_maybe_end(struct cs_builder *b, struct cs_maybe_state *state,
+             struct cs_maybe **maybe)
+{
+   assert(cs_cur_block(b) == &state->block);
+
+   uint32_t num_instrs = cs_block_next_pos(b) - state->patch_pos;
+   size_t size = num_instrs * sizeof(uint64_t);
+   uint64_t *instrs = (uint64_t *) b->blocks.instrs.data + state->patch_pos;
+
+   if (!b->maybe_ctx)
+      b->maybe_ctx = ralloc_context(NULL);
+
+   *maybe = (struct cs_maybe *)
+      ralloc_size(b->maybe_ctx, sizeof(struct cs_maybe) + size);
+   (*maybe)->next_pending = b->blocks.pending_maybes;
+   b->blocks.pending_maybes = *maybe;
+   (*maybe)->patch_pos = state->patch_pos;
+   (*maybe)->num_instrs = num_instrs;
+   /* patch_addr will be computed later in cs_flush_block_instrs, when the
+    * outermost block is closed */
+   (*maybe)->patch_addr = NULL;
+
+   /* Save the emitted instructions in the patch block */
+   memcpy((*maybe)->instrs, instrs, size);
+   /* Replace instructions in the patch block with NOPs */
+   memset(instrs, 0, size);
+
+   cs_block_end(b, &state->block);
+}
+
+#define cs_maybe(__b, __maybe)                                                 \
+   for (struct cs_maybe_state __storage,                                       \
+        *__state = cs_maybe_start(__b, &__storage);                            \
+        __state != NULL; cs_maybe_end(__b, __state, __maybe),                  \
+        __state = NULL)
+
+/* Must be called before cs_finish */
+static inline void
+cs_patch_maybe(struct cs_builder *b, struct cs_maybe *maybe)
+{
+   if (maybe->patch_addr) {
+      /* Called after outer block was closed */
+      memcpy(maybe->patch_addr, maybe->instrs,
+             maybe->num_instrs * sizeof(uint64_t));
+   } else {
+      /* Called before outer block was closed */
+      memcpy((uint64_t *)b->blocks.instrs.data + maybe->patch_pos,
+             maybe->instrs, maybe->num_instrs * sizeof(uint64_t));
+   }
+}
+
 /* Pseudoinstructions follow */
 
 static inline void
@@ -1138,6 +1268,7 @@ cs_run_compute(struct cs_builder *b, unsigned task_increment,
    }
 }
 
+#if PAN_ARCH == 10
 static inline void
 cs_run_tiling(struct cs_builder *b, uint32_t flags_override, bool progress_inc,
               struct cs_shader_res_sel res_sel)
@@ -1151,7 +1282,29 @@ cs_run_tiling(struct cs_builder *b, uint32_t flags_override, bool progress_inc,
       I.fau_select = res_sel.fau;
    }
 }
+#endif
 
+#if PAN_ARCH >= 12
+static inline void
+cs_run_idvs2(struct cs_builder *b, uint32_t flags_override, bool progress_inc,
+             bool malloc_enable, struct cs_index draw_id,
+             enum mali_idvs_shading_mode vertex_shading_mode)
+{
+   cs_emit(b, RUN_IDVS2, I) {
+      I.flags_override = flags_override;
+      I.progress_increment = progress_inc;
+      I.malloc_enable = malloc_enable;
+      I.vertex_shading_mode = vertex_shading_mode;
+
+      if (draw_id.type == CS_INDEX_UNDEF) {
+         I.draw_id_register_enable = false;
+      } else {
+         I.draw_id_register_enable = true;
+         I.draw_id = cs_src32(b, draw_id);
+      }
+   }
+}
+#else
 static inline void
 cs_run_idvs(struct cs_builder *b, uint32_t flags_override, bool progress_inc,
             bool malloc_enable, struct cs_shader_res_sel varying_sel,
@@ -1185,6 +1338,7 @@ cs_run_idvs(struct cs_builder *b, uint32_t flags_override, bool progress_inc,
       I.fragment_tsd_select = frag_sel.tsd == 2;
    }
 }
+#endif
 
 static inline void
 cs_run_fragment(struct cs_builder *b, bool enable_tem,
@@ -1233,7 +1387,7 @@ static inline void
 cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
          unsigned imm)
 {
-   cs_emit(b, ADD_IMMEDIATE32, I) {
+   cs_emit(b, ADD_IMM32, I) {
       I.destination = cs_dst32(b, dest);
       I.source = cs_src32(b, src);
       I.immediate = imm;
@@ -1244,7 +1398,7 @@ static inline void
 cs_add64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
          unsigned imm)
 {
-   cs_emit(b, ADD_IMMEDIATE64, I) {
+   cs_emit(b, ADD_IMM64, I) {
       I.destination = cs_dst64(b, dest);
       I.source = cs_src64(b, src);
       I.immediate = imm;
@@ -1258,7 +1412,7 @@ cs_umin32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
    cs_emit(b, UMIN32, I) {
       I.destination = cs_dst32(b, dest);
       I.source_1 = cs_src32(b, src1);
-      I.source_2 = cs_src32(b, src2);
+      I.source_0 = cs_src32(b, src2);
    }
 }
 
@@ -1334,6 +1488,7 @@ cs_store64(struct cs_builder *b, struct cs_index data, struct cs_index address,
    cs_store(b, data, address, BITFIELD_MASK(2), offset);
 }
 
+#if PAN_ARCH < 11
 /*
  * Select which scoreboard entry will track endpoint tasks and other tasks
  * respectively. Pass to cs_wait to wait later.
@@ -1353,6 +1508,38 @@ cs_set_scoreboard_entry(struct cs_builder *b, unsigned ep, unsigned other)
     * simple. */
    if (unlikely(b->conf.ls_tracker))
       assert(b->conf.ls_tracker->sb_slot == other);
+}
+#else
+static inline void
+cs_set_state_imm32(struct cs_builder *b, enum mali_cs_set_state_type state,
+                   unsigned value)
+{
+   cs_emit(b, SET_STATE_IMM32, I) {
+      I.state = state;
+      I.value = value;
+   }
+
+   /* We assume the load/store scoreboard entry is static to keep things
+    * simple. */
+   if (state == MALI_CS_SET_STATE_TYPE_SB_SEL_OTHER &&
+       unlikely(b->conf.ls_tracker))
+      assert(b->conf.ls_tracker->sb_slot == value);
+}
+#endif
+
+/*
+ * Select which scoreboard entry will track endpoint tasks.
+ * On v10, this also set other endpoint to SB0.
+ * Pass to cs_wait to wait later.
+ */
+static inline void
+cs_select_sb_entries_for_async_ops(struct cs_builder *b, unsigned ep)
+{
+#if PAN_ARCH == 10
+   cs_set_scoreboard_entry(b, ep, 0);
+#else
+   cs_set_state_imm32(b, MALI_CS_SET_STATE_TYPE_SB_SEL_ENDPOINT, ep);
+#endif
 }
 
 static inline void
@@ -1414,13 +1601,14 @@ cs_req_res(struct cs_builder *b, uint32_t res_mask)
 
 static inline void
 cs_flush_caches(struct cs_builder *b, enum mali_cs_flush_mode l2,
-                enum mali_cs_flush_mode lsc, bool other_inv,
-                struct cs_index flush_id, struct cs_async_op async)
+                enum mali_cs_flush_mode lsc,
+                enum mali_cs_other_flush_mode others, struct cs_index flush_id,
+                struct cs_async_op async)
 {
    cs_emit(b, FLUSH_CACHE2, I) {
       I.l2_flush_mode = l2;
       I.lsc_flush_mode = lsc;
-      I.other_invalidate = other_inv;
+      I.other_flush_mode = others;
       I.latest_flush_id = cs_src32(b, flush_id);
       cs_apply_async(I, async);
    }
@@ -1569,7 +1757,7 @@ cs_trace_point(struct cs_builder *b, struct cs_index regs,
 {
    cs_emit(b, TRACE_POINT, I) {
       I.base_register =
-         cs_src_tuple(b, regs, regs.size, BITFIELD_MASK(regs.size));
+         cs_src_tuple(b, regs, regs.size, (uint16_t)BITFIELD_MASK(regs.size));
       I.register_count = regs.size;
       cs_apply_async(I, async);
    }
@@ -1727,45 +1915,45 @@ cs_nop(struct cs_builder *b)
    cs_emit(b, NOP, I) {};
 }
 
-struct cs_exception_handler_ctx {
+struct cs_function_ctx {
    struct cs_index ctx_reg;
    unsigned dump_addr_offset;
    uint8_t ls_sb_slot;
 };
 
-struct cs_exception_handler {
+struct cs_function {
    struct cs_block block;
    struct cs_dirty_tracker dirty;
-   struct cs_exception_handler_ctx ctx;
+   struct cs_function_ctx ctx;
    unsigned dump_size;
    uint64_t address;
    uint32_t length;
 };
 
-static inline struct cs_exception_handler *
-cs_exception_handler_start(struct cs_builder *b,
-                           struct cs_exception_handler *handler,
-                           struct cs_exception_handler_ctx ctx)
+static inline struct cs_function *
+cs_function_start(struct cs_builder *b,
+                  struct cs_function *function,
+                  struct cs_function_ctx ctx)
 {
    assert(cs_cur_block(b) == NULL);
    assert(b->conf.dirty_tracker == NULL);
 
-   *handler = (struct cs_exception_handler){
+   *function = (struct cs_function){
       .ctx = ctx,
    };
 
-   cs_block_start(b, &handler->block);
+   cs_block_start(b, &function->block);
 
-   b->conf.dirty_tracker = &handler->dirty;
+   b->conf.dirty_tracker = &function->dirty;
 
-   return handler;
+   return function;
 }
 
 #define SAVE_RESTORE_MAX_OPS (256 / 16)
 
 static inline void
-cs_exception_handler_end(struct cs_builder *b,
-                         struct cs_exception_handler *handler)
+cs_function_end(struct cs_builder *b,
+                struct cs_function *function)
 {
    struct cs_index ranges[SAVE_RESTORE_MAX_OPS];
    uint16_t masks[SAVE_RESTORE_MAX_OPS];
@@ -1781,8 +1969,8 @@ cs_exception_handler_end(struct cs_builder *b,
    /* Manual cs_block_end() without an instruction flush. We do that to insert
     * the preamble without having to move memory in b->blocks.instrs. The flush
     * will be done after the preamble has been emitted. */
-   assert(cs_cur_block(b) == &handler->block);
-   assert(handler->block.next == NULL);
+   assert(cs_cur_block(b) == &function->block);
+   assert(function->block.next == NULL);
    b->blocks.stack = NULL;
 
    if (!num_instrs)
@@ -1792,7 +1980,7 @@ cs_exception_handler_end(struct cs_builder *b,
    unsigned nregs = b->conf.nr_registers - b->conf.nr_kernel_registers;
    unsigned pos, last = 0;
 
-   BITSET_FOREACH_SET(pos, handler->dirty.regs, nregs) {
+   BITSET_FOREACH_SET(pos, function->dirty.regs, nregs) {
       unsigned range = MIN2(nregs - pos, 16);
       unsigned word = BITSET_BITWORD(pos);
       unsigned bit = pos % BITSET_WORDBITS;
@@ -1801,9 +1989,9 @@ cs_exception_handler_end(struct cs_builder *b,
       if (pos < last)
          continue;
 
-      masks[num_ranges] = handler->dirty.regs[word] >> bit;
+      masks[num_ranges] = function->dirty.regs[word] >> bit;
       if (remaining_bits < range)
-         masks[num_ranges] |= handler->dirty.regs[word + 1] << remaining_bits;
+         masks[num_ranges] |= function->dirty.regs[word + 1] << remaining_bits;
       masks[num_ranges] &= BITFIELD_MASK(range);
 
       ranges[num_ranges] =
@@ -1812,7 +2000,7 @@ cs_exception_handler_end(struct cs_builder *b,
       last = pos + range;
    }
 
-   handler->dump_size = BITSET_COUNT(handler->dirty.regs) * sizeof(uint32_t);
+   function->dump_size = BITSET_COUNT(function->dirty.regs) * sizeof(uint32_t);
 
    /* Make sure the current chunk is able to accommodate the block
     * instructions as well as the preamble and postamble.
@@ -1821,22 +2009,22 @@ cs_exception_handler_end(struct cs_builder *b,
    num_instrs += (num_ranges * 2) + 4;
 
    /* Align things on a cache-line in case the buffer contains more than one
-    * exception handler (64 bytes = 8 instructions). */
+    * function (64 bytes = 8 instructions). */
    uint32_t padded_num_instrs = ALIGN_POT(num_instrs, 8);
 
    if (!cs_reserve_instrs(b, padded_num_instrs))
       return;
 
-   handler->address =
+   function->address =
       b->cur_chunk.buffer.gpu + (b->cur_chunk.pos * sizeof(uint64_t));
 
    /* Preamble: backup modified registers */
    if (num_ranges > 0) {
       unsigned offset = 0;
 
-      cs_load64_to(b, addr_reg, handler->ctx.ctx_reg,
-                   handler->ctx.dump_addr_offset);
-      cs_wait_slot(b, handler->ctx.ls_sb_slot, false);
+      cs_load64_to(b, addr_reg, function->ctx.ctx_reg,
+                   function->ctx.dump_addr_offset);
+      cs_wait_slot(b, function->ctx.ls_sb_slot, false);
 
       for (unsigned i = 0; i < num_ranges; ++i) {
          unsigned reg_count = util_bitcount(masks[i]);
@@ -1845,20 +2033,20 @@ cs_exception_handler_end(struct cs_builder *b,
          offset += reg_count * 4;
       }
 
-      cs_wait_slot(b, handler->ctx.ls_sb_slot, false);
+      cs_wait_slot(b, function->ctx.ls_sb_slot, false);
    }
 
    /* Now that the preamble is emitted, we can flush the instructions we have in
-    * our exception handler block. */
+    * our function block. */
    cs_flush_block_instrs(b);
 
    /* Postamble: restore modified registers */
    if (num_ranges > 0) {
       unsigned offset = 0;
 
-      cs_load64_to(b, addr_reg, handler->ctx.ctx_reg,
-                   handler->ctx.dump_addr_offset);
-      cs_wait_slot(b, handler->ctx.ls_sb_slot, false);
+      cs_load64_to(b, addr_reg, function->ctx.ctx_reg,
+                   function->ctx.dump_addr_offset);
+      cs_wait_slot(b, function->ctx.ls_sb_slot, false);
 
       for (unsigned i = 0; i < num_ranges; ++i) {
          unsigned reg_count = util_bitcount(masks[i]);
@@ -1867,21 +2055,20 @@ cs_exception_handler_end(struct cs_builder *b,
          offset += reg_count * 4;
       }
 
-      cs_wait_slot(b, handler->ctx.ls_sb_slot, false);
+      cs_wait_slot(b, function->ctx.ls_sb_slot, false);
    }
 
    /* Fill the rest of the buffer with NOPs. */
    for (; num_instrs < padded_num_instrs; num_instrs++)
       cs_nop(b);
 
-   handler->length = padded_num_instrs;
+   function->length = padded_num_instrs;
 }
 
-#define cs_exception_handler_def(__b, __handler, __ctx)                        \
-   for (struct cs_exception_handler *__ehandler =                              \
-           cs_exception_handler_start(__b, __handler, __ctx);                  \
-        __ehandler != NULL;                                                    \
-        cs_exception_handler_end(__b, __handler), __ehandler = NULL)
+#define cs_function_def(__b, __function, __ctx)                                \
+   for (struct cs_function *__tmp = cs_function_start(__b, __function, __ctx); \
+        __tmp != NULL;                                                         \
+        cs_function_end(__b, __function), __tmp = NULL)
 
 struct cs_tracing_ctx {
    bool enabled;
@@ -1946,6 +2133,51 @@ cs_trace_run_fragment(struct cs_builder *b, const struct cs_tracing_ctx *ctx,
    cs_wait_slot(b, ctx->ls_sb_slot, false);
 }
 
+#if PAN_ARCH >= 12
+struct cs_run_idvs2_trace {
+   uint64_t ip;
+   uint32_t draw_id;
+   uint32_t pad;
+   uint32_t sr[66];
+} __attribute__((aligned(64)));
+
+static inline void
+cs_trace_run_idvs2(struct cs_builder *b, const struct cs_tracing_ctx *ctx,
+                   struct cs_index scratch_regs, uint32_t flags_override,
+                   bool progress_inc, bool malloc_enable,
+                   struct cs_index draw_id,
+                   enum mali_idvs_shading_mode vertex_shading_mode)
+{
+   if (likely(!ctx->enabled)) {
+      cs_run_idvs2(b, flags_override, progress_inc, malloc_enable, draw_id,
+                   vertex_shading_mode);
+      return;
+   }
+
+   struct cs_index tracebuf_addr = cs_reg64(b, scratch_regs.reg);
+   struct cs_index data = cs_reg64(b, scratch_regs.reg + 2);
+
+   cs_trace_preamble(b, ctx, scratch_regs, sizeof(struct cs_run_idvs2_trace));
+
+   /* cs_run_xx() must immediately follow cs_load_ip_to() otherwise the IP
+    * won't point to the right instruction. */
+   cs_load_ip_to(b, data);
+   cs_run_idvs2(b, flags_override, progress_inc, malloc_enable, draw_id,
+                vertex_shading_mode);
+   cs_store64(b, data, tracebuf_addr, cs_trace_field_offset(run_idvs2, ip));
+
+   if (draw_id.type != CS_INDEX_UNDEF)
+      cs_store32(b, draw_id, tracebuf_addr,
+                 cs_trace_field_offset(run_idvs2, draw_id));
+
+   for (unsigned i = 0; i < 64; i += 16)
+      cs_store(b, cs_reg_tuple(b, i, 16), tracebuf_addr, BITFIELD_MASK(16),
+               cs_trace_field_offset(run_idvs2, sr[i]));
+   cs_store(b, cs_reg_tuple(b, 64, 2), tracebuf_addr, BITFIELD_MASK(2),
+            cs_trace_field_offset(run_idvs2, sr[64]));
+   cs_wait_slot(b, ctx->ls_sb_slot, false);
+}
+#else
 struct cs_run_idvs_trace {
    uint64_t ip;
    uint32_t draw_id;
@@ -1990,6 +2222,7 @@ cs_trace_run_idvs(struct cs_builder *b, const struct cs_tracing_ctx *ctx,
             cs_trace_field_offset(run_idvs, sr[48]));
    cs_wait_slot(b, ctx->ls_sb_slot, false);
 }
+#endif
 
 struct cs_run_compute_trace {
    uint64_t ip;

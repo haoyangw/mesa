@@ -3,11 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "util/half_float.h"
-
-using namespace brw;
 
 static uint64_t
 src_as_uint(const brw_reg &src)
@@ -89,7 +87,7 @@ brw_imm_for_type(uint64_t value, enum brw_reg_type type)
  * Converts a MAD to an ADD by folding the multiplicand sources.
  */
 static void
-fold_multiplicands_of_MAD(fs_inst *inst)
+fold_multiplicands_of_MAD(brw_inst *inst)
 {
    assert(inst->opcode == BRW_OPCODE_MAD);
    assert (inst->src[1].file == IMM &&
@@ -135,7 +133,7 @@ fold_multiplicands_of_MAD(fs_inst *inst)
 }
 
 bool
-brw_opt_constant_fold_instruction(const intel_device_info *devinfo, fs_inst *inst)
+brw_opt_constant_fold_instruction(const intel_device_info *devinfo, brw_inst *inst)
 {
    bool progress = false;
 
@@ -355,12 +353,12 @@ brw_opt_constant_fold_instruction(const intel_device_info *devinfo, fs_inst *ins
 }
 
 bool
-brw_opt_algebraic(fs_visitor &s)
+brw_opt_algebraic(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
    bool progress = false;
 
-   foreach_block_and_inst_safe(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst_safe(block, brw_inst, inst, s.cfg) {
       if (brw_opt_constant_fold_instruction(devinfo, inst)) {
          progress = true;
          continue;
@@ -456,7 +454,7 @@ brw_opt_algebraic(fs_visitor &s)
             if (inst->dst.type != inst->src[0].type &&
                 inst->dst.type != BRW_TYPE_DF &&
                 inst->src[0].type != BRW_TYPE_F)
-               assert(!"unimplemented: saturate mixed types");
+               unreachable("unimplemented: saturate mixed types");
 
             if (brw_reg_saturate_immediate(&inst->src[0])) {
                inst->saturate = false;
@@ -595,6 +593,7 @@ brw_opt_algebraic(fs_visitor &s)
                default:
                   break;
                }
+               break;
             default:
                break;
             }
@@ -775,8 +774,8 @@ brw_opt_algebraic(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTION_DATA_FLOW |
+                            BRW_DEPENDENCY_INSTRUCTION_DETAIL);
 
    return progress;
 }

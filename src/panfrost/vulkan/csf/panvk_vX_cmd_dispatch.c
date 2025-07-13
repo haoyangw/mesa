@@ -20,6 +20,7 @@
 #include "panvk_cmd_push_constant.h"
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
+#include "panvk_macros.h"
 #include "panvk_meta.h"
 #include "panvk_physical_device.h"
 
@@ -64,68 +65,57 @@ prepare_driver_set(struct panvk_cmd_buffer *cmdbuf)
    return VK_SUCCESS;
 }
 
-static void
-calculate_task_axis_and_increment(const struct panvk_shader *shader,
-                                  struct panvk_physical_device *phys_dev,
-                                  unsigned *task_axis, unsigned *task_increment)
+uint64_t
+panvk_per_arch(cmd_dispatch_prepare_tls)(struct panvk_cmd_buffer *cmdbuf,
+                                         const struct panvk_shader *shader,
+                                         const struct pan_compute_dim *dim,
+                                         bool indirect)
 {
-   /* Pick the task_axis and task_increment to maximize thread
-    * utilization. */
-   unsigned threads_per_wg =
-      shader->local_size.x * shader->local_size.y * shader->local_size.z;
-   unsigned max_thread_cnt = panfrost_compute_max_thread_count(
-      &phys_dev->kmod.props, shader->info.work_reg_count);
-   unsigned threads_per_task = threads_per_wg;
-   unsigned local_size[3] = {
-      shader->local_size.x,
-      shader->local_size.y,
-      shader->local_size.z,
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(cmdbuf->vk.base.device->physical);
+
+   struct panfrost_ptr tsd = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
+   if (!tsd.gpu)
+      return tsd.gpu;
+
+   struct pan_tls_info tlsinfo = {
+      .tls.size = shader->info.tls_size,
+      .wls.size = shader->info.wls_size,
    };
 
-   for (unsigned i = 0; i < 3; i++) {
-      if (threads_per_task * local_size[i] >= max_thread_cnt) {
-         /* We reached out thread limit, stop at the current axis and
-          * calculate the increment so it doesn't exceed the per-core
-          * thread capacity.
-          */
-         *task_increment = max_thread_cnt / threads_per_task;
-         break;
-      } else if (*task_axis == MALI_TASK_AXIS_Z) {
-         /* We reached the Z axis, and there's still room to stuff more
-          * threads. Pick the current axis grid size as our increment
-          * as there's no point using something bigger.
-          */
-         *task_increment = local_size[i];
-         break;
-      }
+   if (tlsinfo.wls.size) {
+      unsigned core_id_range;
+      panfrost_query_core_count(&phys_dev->kmod.props, &core_id_range);
 
-      threads_per_task *= local_size[i];
-      (*task_axis)++;
+      tlsinfo.wls.instances = pan_calc_wls_instances(
+         &shader->cs.local_size, &phys_dev->kmod.props, indirect ? NULL : dim);
+
+      unsigned wls_total_size = pan_calc_total_wls_size(
+         tlsinfo.wls.size, tlsinfo.wls.instances, core_id_range);
+
+      /* TODO: Reuse WLS allocation for all dispatch commands in the command
+       * buffer, similar to what we do for TLS in draw. As WLS size (and
+       * instance count) might differ significantly between dispatch commands,
+       * rather than track a single maximum size, we might want to consider
+       * multiple allocations for different size buckets. */
+      tlsinfo.wls.ptr =
+         panvk_cmd_alloc_dev_mem(cmdbuf, tls, wls_total_size, 4096).gpu;
+      if (!tlsinfo.wls.ptr)
+         return 0;
    }
 
-   assert(*task_axis <= MALI_TASK_AXIS_Z);
-   assert(*task_increment > 0);
-}
+   cmdbuf->state.tls.info.tls.size =
+      MAX2(shader->info.tls_size, cmdbuf->state.tls.info.tls.size);
 
-static unsigned
-calculate_workgroups_per_task(const struct panvk_shader *shader,
-                              struct panvk_physical_device *phys_dev)
-{
-   /* Each shader core can run N tasks and a total of M threads at any single
-    * time, thus each task should ideally have no more than M/N threads. */
-   unsigned max_threads_per_task = phys_dev->kmod.props.max_threads_per_core /
-                                   phys_dev->kmod.props.max_tasks_per_core;
+   if (!cmdbuf->state.tls.desc.gpu) {
+      cmdbuf->state.tls.desc = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
+      if (!cmdbuf->state.tls.desc.gpu)
+         return 0;
+   }
 
-   /* To achieve the best utilization, we should aim for as many workgroups
-    * per tasks as we can fit without exceeding the above thread limit */
-   unsigned threads_per_wg =
-      shader->local_size.x * shader->local_size.y * shader->local_size.z;
-   assert(threads_per_wg > 0 &&
-          threads_per_wg <= phys_dev->kmod.props.max_threads_per_wg);
-   unsigned wg_per_task = DIV_ROUND_UP(max_threads_per_task, threads_per_wg);
-   assert(wg_per_task > 0 && wg_per_task <= max_threads_per_task);
+   GENX(pan_emit_tls)(&tlsinfo, tsd.cpu);
 
-   return wg_per_task;
+   return tsd.gpu;
 }
 
 static void
@@ -147,73 +137,23 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
    const struct cs_tracing_ctx *tracing_ctx =
       &cmdbuf->state.cs[PANVK_SUBQUEUE_COMPUTE].tracing;
 
-   struct panfrost_ptr tsd = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
-   if (!tsd.gpu)
-      return;
-
-   struct pan_tls_info tlsinfo = {
-      .tls.size = shader->info.tls_size,
-      .wls.size = shader->info.wls_size,
+   struct pan_compute_dim dim = {
+      info->direct.wg_count.x,
+      info->direct.wg_count.y,
+      info->direct.wg_count.z,
    };
-   unsigned core_id_range;
-   unsigned core_count =
-      panfrost_query_core_count(&phys_dev->kmod.props, &core_id_range);
-
    bool indirect = info->indirect.buffer_dev_addr != 0;
+
+   uint64_t tsd =
+      panvk_per_arch(cmd_dispatch_prepare_tls)(cmdbuf, shader, &dim, indirect);
+   if (!tsd)
+      return;
 
    /* Only used for indirect dispatch */
    unsigned wg_per_task = 0;
    if (indirect)
-      wg_per_task = calculate_workgroups_per_task(shader, phys_dev);
-
-   if (tlsinfo.wls.size) {
-      /* NOTE: If the instance count is lower than the number of workgroups
-       * being dispatched, the HW will hold back workgroups until instances
-       * can be reused. */
-      /* NOTE: There is no benefit from allocating more instances than what
-       * can concurrently be used by the HW */
-      if (indirect) {
-         /* Assume we utilize all shader cores to the max */
-         tlsinfo.wls.instances = util_next_power_of_two(
-            wg_per_task * phys_dev->kmod.props.max_tasks_per_core * core_count);
-      } else {
-         /* TODO: Similar to what we are doing for indirect this should change
-          * to calculate the maximum number of workgroups we can execute
-          * concurrently. */
-         struct pan_compute_dim dim = {
-            info->direct.wg_count.x,
-            info->direct.wg_count.y,
-            info->direct.wg_count.z,
-         };
-
-         tlsinfo.wls.instances = pan_wls_instances(&dim);
-      }
-
-      /* TODO: Clamp WLS instance to some maximum WLS budget. */
-      unsigned wls_total_size = pan_wls_adjust_size(tlsinfo.wls.size) *
-                                tlsinfo.wls.instances * core_id_range;
-
-      /* TODO: Reuse WLS allocation for all dispatch commands in the command
-       * buffer, similar to what we do for TLS in draw. As WLS size (and
-       * instance count) might differ significantly between dispatch commands,
-       * rather than track a single maximum size, we might want to consider
-       * multiple allocations for different size buckets. */
-      tlsinfo.wls.ptr =
-         panvk_cmd_alloc_dev_mem(cmdbuf, tls, wls_total_size, 4096).gpu;
-      if (!tlsinfo.wls.ptr)
-         return;
-   }
-
-   cmdbuf->state.tls.info.tls.size =
-      MAX2(shader->info.tls_size, cmdbuf->state.tls.info.tls.size);
-
-   if (!cmdbuf->state.tls.desc.gpu) {
-      cmdbuf->state.tls.desc = panvk_cmd_alloc_desc(cmdbuf, LOCAL_STORAGE);
-      if (!cmdbuf->state.tls.desc.gpu)
-         return;
-   }
-
-   GENX(pan_emit_tls)(&tlsinfo, tsd.cpu);
+      wg_per_task = pan_calc_workgroups_per_task(&shader->cs.local_size,
+                                                 &phys_dev->kmod.props);
 
    if (compute_state_dirty(cmdbuf, DESC_STATE) ||
        compute_state_dirty(cmdbuf, CS)) {
@@ -245,11 +185,11 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
    struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
 
    /* Copy the global TLS pointer to the per-job TSD. */
-   if (tlsinfo.tls.size) {
+   if (shader->info.tls_size) {
       cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
       cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
       cs_wait_slot(b, SB_ID(LS), false);
-      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd.gpu);
+      cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
       cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
       cs_wait_slot(b, SB_ID(LS), false);
    }
@@ -257,71 +197,80 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
    cs_update_compute_ctx(b) {
       if (compute_state_dirty(cmdbuf, CS) ||
           compute_state_dirty(cmdbuf, DESC_STATE))
-         cs_move64_to(b, cs_sr_reg64(b, 0), cs_desc_state->res_table);
+         cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SRT_0),
+                      cs_desc_state->res_table);
 
       if (compute_state_dirty(cmdbuf, PUSH_UNIFORMS)) {
          uint64_t fau_ptr = cmdbuf->state.compute.push_uniforms |
                             ((uint64_t)shader->fau.total_count << 56);
-         cs_move64_to(b, cs_sr_reg64(b, 8), fau_ptr);
+         cs_move64_to(b, cs_sr_reg64(b, COMPUTE, FAU_0), fau_ptr);
       }
 
       if (compute_state_dirty(cmdbuf, CS))
-         cs_move64_to(b, cs_sr_reg64(b, 16),
+         cs_move64_to(b, cs_sr_reg64(b, COMPUTE, SPD_0),
                       panvk_priv_mem_dev_addr(shader->spd));
 
-      cs_move64_to(b, cs_sr_reg64(b, 24), tsd.gpu);
+      cs_move64_to(b, cs_sr_reg64(b, COMPUTE, TSD_0), tsd);
 
       /* Global attribute offset */
-      cs_move32_to(b, cs_sr_reg32(b, 32), 0);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, GLOBAL_ATTRIBUTE_OFFSET),
+                   0);
 
       struct mali_compute_size_workgroup_packed wg_size;
       pan_pack(&wg_size, COMPUTE_SIZE_WORKGROUP, cfg) {
-         cfg.workgroup_size_x = shader->local_size.x;
-         cfg.workgroup_size_y = shader->local_size.y;
-         cfg.workgroup_size_z = shader->local_size.z;
+         cfg.workgroup_size_x = shader->cs.local_size.x;
+         cfg.workgroup_size_y = shader->cs.local_size.y;
+         cfg.workgroup_size_z = shader->cs.local_size.z;
          cfg.allow_merging_workgroups = false;
       }
-      cs_move32_to(b, cs_sr_reg32(b, 33), wg_size.opaque[0]);
-      cs_move32_to(b, cs_sr_reg32(b, 34),
-                   info->wg_base.x * shader->local_size.x);
-      cs_move32_to(b, cs_sr_reg32(b, 35),
-                   info->wg_base.y * shader->local_size.y);
-      cs_move32_to(b, cs_sr_reg32(b, 36),
-                   info->wg_base.z * shader->local_size.z);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, WG_SIZE),
+                   wg_size.opaque[0]);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_OFFSET_X),
+                   info->wg_base.x * shader->cs.local_size.x);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_OFFSET_Y),
+                   info->wg_base.y * shader->cs.local_size.y);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_OFFSET_Z),
+                   info->wg_base.z * shader->cs.local_size.z);
       if (indirect) {
          /* Load parameters from indirect buffer and update workgroup count
           * registers and sysvals */
          cs_move64_to(b, cs_scratch_reg64(b, 0),
                       info->indirect.buffer_dev_addr);
-         cs_load_to(b, cs_sr_reg_tuple(b, 37, 3), cs_scratch_reg64(b, 0),
-                    BITFIELD_MASK(3), 0);
+         cs_load_to(b, cs_sr_reg_tuple(b, COMPUTE, JOB_SIZE_X, 3),
+                    cs_scratch_reg64(b, 0), BITFIELD_MASK(3), 0);
          cs_move64_to(b, cs_scratch_reg64(b, 0),
                       cmdbuf->state.compute.push_uniforms);
          cs_wait_slot(b, SB_ID(LS), false);
 
          if (shader_uses_sysval(shader, compute, num_work_groups.x)) {
-            cs_store32(b, cs_sr_reg32(b, 37), cs_scratch_reg64(b, 0),
+            cs_store32(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_X),
+                       cs_scratch_reg64(b, 0),
                        shader_remapped_sysval_offset(
                           shader, sysval_offset(compute, num_work_groups.x)));
          }
 
          if (shader_uses_sysval(shader, compute, num_work_groups.y)) {
-            cs_store32(b, cs_sr_reg32(b, 38), cs_scratch_reg64(b, 0),
+            cs_store32(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Y),
+                       cs_scratch_reg64(b, 0),
                        shader_remapped_sysval_offset(
                           shader, sysval_offset(compute, num_work_groups.y)));
          }
 
          if (shader_uses_sysval(shader, compute, num_work_groups.z)) {
-            cs_store32(b, cs_sr_reg32(b, 39), cs_scratch_reg64(b, 0),
+            cs_store32(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Z),
+                       cs_scratch_reg64(b, 0),
                        shader_remapped_sysval_offset(
                           shader, sysval_offset(compute, num_work_groups.z)));
          }
 
          cs_wait_slot(b, SB_ID(LS), false);
       } else {
-         cs_move32_to(b, cs_sr_reg32(b, 37), info->direct.wg_count.x);
-         cs_move32_to(b, cs_sr_reg32(b, 38), info->direct.wg_count.y);
-         cs_move32_to(b, cs_sr_reg32(b, 39), info->direct.wg_count.z);
+         cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_X),
+                      info->direct.wg_count.x);
+         cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Y),
+                      info->direct.wg_count.y);
+         cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Z),
+                      info->direct.wg_count.z);
       }
    }
 
@@ -343,8 +292,8 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
    } else {
       unsigned task_axis = MALI_TASK_AXIS_X;
       unsigned task_increment = 0;
-      calculate_task_axis_and_increment(shader, phys_dev, &task_axis,
-                                        &task_increment);
+      panvk_per_arch(calculate_task_axis_and_increment)(
+         shader, phys_dev, &task_axis, &task_increment);
       cs_trace_run_compute(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                            task_increment, task_axis, false,
                            cs_shader_res_sel(0, 0, 0, 0));

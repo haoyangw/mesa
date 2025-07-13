@@ -48,10 +48,9 @@ meson setup `
 -Dllvm=enabled `
 -Dshared-llvm=disabled `
 -Dvulkan-drivers="swrast,amd,microsoft-experimental" `
--Dgallium-drivers="swrast,d3d12,zink" `
+-Dgallium-drivers="llvmpipe,softpipe,d3d12,zink" `
 -Dgallium-va=enabled `
 -Dvideo-codecs="all" `
--Dshared-glapi=enabled `
 -Dgles1=enabled `
 -Dgles2=enabled `
 -Dgallium-opencl=icd `

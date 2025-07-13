@@ -123,7 +123,7 @@ get_bvh_layout(VkGeometryTypeKHR geometry_type,
    uint32_t internal_count = MAX2(leaf_count, 2) - 1;
 
    uint64_t offset = sizeof(struct tu_accel_struct_header);
-   
+
    /* Instance descriptors, one per instance. */
    if (geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR) {
       offset += leaf_count * sizeof(struct tu_instance_descriptor);
@@ -491,7 +491,7 @@ tu_CmdCopyAccelerationStructureKHR(VkCommandBuffer commandBuffer, const VkCopyAc
                               &consts);
 
    TU_CALLX(cmd->device, tu_CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct tu_accel_struct_header, copy_dispatch_size));
 
    tu_restore_compute_state(cmd, &state);
@@ -567,7 +567,7 @@ tu_CmdCopyAccelerationStructureToMemoryKHR(VkCommandBuffer commandBuffer,
                               &consts);
 
    TU_CALLX(cmd->device, tu_CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct tu_accel_struct_header, copy_dispatch_size));
 
    tu_restore_compute_state(cmd, &state);
@@ -708,15 +708,16 @@ dump_internal(struct tu_internal_node *node, uint32_t *max_child)
 static void
 dump_as(struct vk_acceleration_structure *as)
 {
-   VK_FROM_HANDLE(tu_buffer, buf, as->buffer);
+   VK_FROM_HANDLE(tu_buffer, buf, vk_buffer_to_handle(as->buffer));
 
    struct tu_accel_struct_header *hdr =
       (struct tu_accel_struct_header *)((char *)buf->bo->map + as->offset);
-   
-   fprintf(stderr, "dumping AS at %" PRIx64 "\n", buf->iova + as->offset);
+
+   fprintf(stderr, "dumping AS at %" PRIx64 "\n",
+           vk_buffer_address(&buf->vk, as->offset));
    u_hexdump(stderr, (uint8_t *)hdr, sizeof(*hdr), false);
 
-   char *base = ((char *)buf->bo->map + (hdr->bvh_ptr - buf->iova));
+   char *base = ((char *)buf->bo->map + (hdr->bvh_ptr - buf->vk.device_address));
    struct tu_node *node = (struct tu_node *)base;
 
    fprintf(stderr, "dumping nodes at %" PRIx64 "\n", hdr->bvh_ptr);
@@ -741,12 +742,12 @@ dump_as(struct vk_acceleration_structure *as)
 static bool
 as_finished(struct tu_device *dev, struct vk_acceleration_structure *as)
 {
-   VK_FROM_HANDLE(tu_buffer, buf, as->buffer);
+   VK_FROM_HANDLE(tu_buffer, buf, vk_buffer_to_handle(as->buffer));
    tu_bo_map(dev, buf->bo, NULL);
 
    struct tu_accel_struct_header *hdr =
       (struct tu_accel_struct_header *)((char *)buf->bo->map + as->offset);
-   return hdr->self_ptr == buf->iova + as->offset;
+   return hdr->self_ptr == vk_buffer_address(&buf->vk, as->offset);
 }
 
 VKAPI_ATTR void VKAPI_CALL

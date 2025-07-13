@@ -155,7 +155,7 @@ tu_CreateDescriptorSetLayout(
 
    set_layout =
       (struct tu_descriptor_set_layout *) vk_descriptor_set_layout_zalloc(
-         &device->vk, size);
+         &device->vk, size, pCreateInfo);
    if (!set_layout)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -1007,7 +1007,7 @@ buffer_info_to_address(const VkDescriptorBufferInfo *buffer_info)
    VK_FROM_HANDLE(tu_buffer, buffer, buffer_info->buffer);
 
    uint32_t range = buffer ? vk_buffer_range(&buffer->vk, buffer_info->offset, buffer_info->range) : 0;
-   uint64_t va = buffer ? buffer->iova + buffer_info->offset : 0;
+   uint64_t va = buffer ? vk_buffer_address(&buffer->vk, buffer_info->offset) : 0;
 
    return (VkDescriptorAddressInfoEXT) {
       .address = va,

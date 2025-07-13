@@ -442,6 +442,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
 
    vk_object_base_init(device, &chain->base, VK_OBJECT_TYPE_SWAPCHAIN_KHR);
 
+   chain->create_flags = pCreateInfo->flags;
    chain->wsi = wsi;
    chain->device = _device;
    chain->alloc = *pAllocator;
@@ -459,6 +460,9 @@ wsi_swapchain_init(const struct wsi_device *wsi,
    if (!chain->cmd_pools)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+   const VkCommandPoolCreateFlags cmd_pool_flags =
+      (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR) ?
+      VK_COMMAND_POOL_CREATE_PROTECTED_BIT : 0;
    for (uint32_t i = 0; i < cmd_pools_count; i++) {
       int queue_family_index = i;
 
@@ -476,7 +480,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
       const VkCommandPoolCreateInfo cmd_pool_info = {
          .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
          .pNext = NULL,
-         .flags = 0,
+         .flags = cmd_pool_flags,
          .queueFamilyIndex = queue_family_index,
       };
       result = wsi->CreateCommandPool(_device, &cmd_pool_info, &chain->alloc,
@@ -613,9 +617,13 @@ wsi_configure_image(const struct wsi_swapchain *chain,
       for (uint32_t i = 0; i < pCreateInfo->queueFamilyIndexCount; i++)
          queue_family_indices[i] = pCreateInfo->pQueueFamilyIndices[i];
 
+   const VkImageCreateFlags protected_flag =
+      (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR) ?
+      VK_IMAGE_CREATE_PROTECTED_BIT : 0;
+
    info->create = (VkImageCreateInfo) {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .flags = VK_IMAGE_CREATE_ALIAS_BIT,
+      .flags = VK_IMAGE_CREATE_ALIAS_BIT | protected_flag,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = pCreateInfo->imageFormat,
       .extent = {
@@ -1637,14 +1645,15 @@ wsi_GetDeviceGroupSurfacePresentModesKHR(VkDevice device,
 bool
 wsi_common_vk_instance_supports_present_wait(const struct vk_instance *instance)
 {
+#if DETECT_OS_ANDROID
+   /* Android's Vulkan loader does not provide KHR_present_wait or
+    * KHR_present_id for KHR_android_surface. */
+   return false;
+#else
    /* We can only expose KHR_present_wait and KHR_present_id
     * if we are guaranteed support on all potential VkSurfaceKHR objects. */
-   if (instance->enabled_extensions.KHR_win32_surface ||
-       instance->enabled_extensions.KHR_android_surface) {
-      return false;
-   }
-
-   return true;
+   return !instance->enabled_extensions.KHR_win32_surface;
+#endif
 }
 
 VkResult
@@ -1791,6 +1800,9 @@ wsi_create_buffer_blit_context(const struct wsi_swapchain *chain,
    const struct wsi_device *wsi = chain->wsi;
    VkResult result;
 
+   const VkBufferUsageFlags create_flags =
+      (chain->create_flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR) ?
+      VK_BUFFER_CREATE_PROTECTED_BIT : 0;
    const VkExternalMemoryBufferCreateInfo buffer_external_info = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
       .pNext = NULL,
@@ -1799,6 +1811,7 @@ wsi_create_buffer_blit_context(const struct wsi_swapchain *chain,
    const VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .pNext = &buffer_external_info,
+      .flags = create_flags,
       .size = info->linear_size,
       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -1976,7 +1989,7 @@ wsi_finish_create_blit_context(const struct wsi_swapchain *chain,
                               0,
                               0, NULL,
                               0, NULL,
-                              1, img_mem_barriers);
+                              img_mem_barrier_count, img_mem_barriers);
 
       if (chain->blit.type == WSI_SWAPCHAIN_BUFFER_BLIT) {
          struct VkBufferImageCopy buffer_image_copy = {
@@ -2253,4 +2266,16 @@ wsi_device_supports_explicit_sync(struct wsi_device *device)
    return !device->sw && device->has_timeline_semaphore &&
       (device->timeline_semaphore_export_handle_types &
        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+wsi_SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
+                      const VkSwapchainKHR* pSwapchains,
+                      const VkHdrMetadataEXT* pMetadata)
+{
+   for (uint32_t i = 0; i < swapchainCount; i++) {
+      VK_FROM_HANDLE(wsi_swapchain, swapchain, pSwapchains[i]);
+      if (swapchain->set_hdr_metadata)
+         swapchain->set_hdr_metadata(swapchain, pMetadata);
+   }
 }

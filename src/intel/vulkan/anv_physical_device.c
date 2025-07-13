@@ -131,6 +131,8 @@ get_device_extensions(const struct anv_physical_device *device,
       (device->sync_syncobj_type.features & VK_SYNC_FEATURE_CPU_WAIT) != 0;
 
    const bool rt_enabled = ANV_SUPPORT_RT && device->info.has_ray_tracing;
+   const bool video_decode_enabled = device->instance->debug & ANV_DEBUG_VIDEO_DECODE;
+   const bool video_encode_enabled = device->instance->debug & ANV_DEBUG_VIDEO_ENCODE;
 
    *ext = (struct vk_device_extension_table) {
       .KHR_8bit_storage                      = true,
@@ -178,13 +180,14 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_maintenance5                      = true,
       .KHR_maintenance6                      = true,
       .KHR_maintenance7                      = true,
+      .KHR_maintenance8                      = true,
       .KHR_map_memory2                       = true,
       .KHR_multiview                         = true,
       .KHR_performance_query =
          device->perf &&
          (intel_perf_has_hold_preemption(device->perf) ||
           INTEL_DEBUG(DEBUG_NO_OACONFIG)) &&
-         device->use_call_secondary,
+         !(device->instance->debug & ANV_DEBUG_NO_SECONDARY_CALL),
       .KHR_pipeline_executable_properties    = true,
       .KHR_pipeline_library                  = true,
       /* Hide these behind dri configs for now since we cannot implement it reliably on
@@ -234,17 +237,21 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_uniform_buffer_standard_layout    = true,
       .KHR_variable_pointers                 = true,
       .KHR_vertex_attribute_divisor          = true,
-      .KHR_video_queue                       = device->video_decode_enabled || device->video_encode_enabled,
-      .KHR_video_decode_queue                = device->video_decode_enabled,
-      .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && device->video_decode_enabled,
-      .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && device->video_decode_enabled,
-      .KHR_video_decode_av1                  = device->info.ver >= 12 && VIDEO_CODEC_AV1DEC && device->video_decode_enabled,
-      .KHR_video_encode_queue                = device->video_encode_enabled,
-      .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && device->video_encode_enabled,
-      .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && device->video_encode_enabled,
-      .KHR_video_maintenance1                = (device->video_decode_enabled &&
+      .KHR_video_queue                       = video_decode_enabled || video_encode_enabled,
+      .KHR_video_decode_queue                = video_decode_enabled,
+      .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && video_decode_enabled,
+      .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && video_decode_enabled,
+      .KHR_video_decode_av1                  = device->info.ver >= 12 && VIDEO_CODEC_AV1DEC && video_decode_enabled,
+      .KHR_video_encode_queue                = video_encode_enabled,
+      .KHR_video_encode_h264                 = VIDEO_CODEC_H264ENC && video_encode_enabled,
+      .KHR_video_encode_h265                 = device->info.ver >= 12 && VIDEO_CODEC_H265ENC && video_encode_enabled,
+      .KHR_video_maintenance1                = (video_decode_enabled &&
                                                (VIDEO_CODEC_H264DEC || VIDEO_CODEC_H265DEC)) ||
-                                               (device->video_encode_enabled &&
+                                               (video_encode_enabled &&
+                                               (VIDEO_CODEC_H264ENC || VIDEO_CODEC_H265ENC)),
+      .KHR_video_maintenance2                = (video_decode_enabled &&
+                                               (VIDEO_CODEC_H264DEC || VIDEO_CODEC_H265DEC)) ||
+                                               (video_encode_enabled &&
                                                (VIDEO_CODEC_H264ENC || VIDEO_CODEC_H265ENC)),
       .KHR_vulkan_memory_model               = true,
       .KHR_workgroup_memory_explicit_layout  = true,
@@ -267,6 +274,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_descriptor_buffer                 = true,
       .EXT_descriptor_indexing               = true,
+      .EXT_device_memory_report              = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control                   = true,
 #endif
@@ -281,7 +289,8 @@ get_device_extensions(const struct anv_physical_device *device,
                                                VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
       .EXT_global_priority_query             = device->max_context_priority >=
                                                VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
-      .EXT_graphics_pipeline_library         = !debug_get_bool_option("ANV_NO_GPL", false),
+      .EXT_graphics_pipeline_library         = !(device->instance->debug & ANV_DEBUG_NO_GPL),
+      .EXT_hdr_metadata = true,
       .EXT_host_image_copy                   = !device->emu_astc_ldr,
       .EXT_host_query_reset                  = true,
       .EXT_image_2d_view_of_3d               = true,
@@ -334,6 +343,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_shader_atomic_float               = true,
       .EXT_shader_atomic_float2              = true,
       .EXT_shader_demote_to_helper_invocation = true,
+      .EXT_shader_image_atomic_int64         = true,
       .EXT_shader_module_identifier          = true,
       .EXT_shader_replicated_composites      = true,
       .EXT_shader_stencil_export             = true,
@@ -576,6 +586,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_depth_clip_enable */
       .depthClipEnable = true,
 
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
+
       /* VK_EXT_fragment_shader_interlock */
       .fragmentShaderSampleInterlock = true,
       .fragmentShaderPixelInterlock = true,
@@ -583,6 +596,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_EXT_global_priority_query */
       .globalPriorityQuery = true,
+
+      /* VK_EXT_device_memory_report */
+      .deviceMemoryReport = true,
 
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibrary =
@@ -878,6 +894,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_KHR_video_maintenance1 */
       .videoMaintenance1 = true,
 
+      /* VK_KHR_video_maintenance2 */
+      .videoMaintenance2 = true,
+
       /* VK_EXT_image_compression_control */
       .imageCompressionControl = true,
 
@@ -907,6 +926,13 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_EXT_host_image_copy */
       .hostImageCopy = true,
+
+      /* VK_EXT_shader_image_atomic_int64 */
+      .shaderImageInt64Atomics = true,
+      .sparseImageInt64Atomics = false,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1928,13 +1954,69 @@ get_properties(const struct anv_physical_device *pdevice,
    }
 }
 
+/* This function restricts the maximum size of system memory heap. The
+ * reasoning is that if we allow all the RAM to be used by graphics, nothing
+ * will remain for the rest of the system.
+ *
+ * In practice, applications should really be using VK_EXT_memory_budget
+ * instead of relying on our heuristics.
+ *
+ * The i915.ko driver has always reported 100% of the total available RAM.
+ * The xe.ko driver changed its behavior after commit d2d5f6d57884 ("drm/xe:
+ * Increase the XE_PL_TT watermark"), so we need to detect that and make a
+ * choice based on it.
+ */
+static uint64_t
+anv_restrict_sys_heap_size(struct anv_physical_device *device,
+                           uint64_t kmd_reported_sram)
+{
+   if (device->info.kmd_type == INTEL_KMD_TYPE_XE) {
+      uint64_t sys_reported_sram;
+      if (!os_get_total_physical_memory(&sys_reported_sram))
+         return kmd_reported_sram;
+
+      /* From what I could gather, kmd_reported_sram always seems to be
+       * exactly half of sys_reported_sram in older Kernels, but let's leave
+       * some room for imprecision here in case the interfaces chosen to
+       * report memory end up changing, accounting things differently somehow.
+       *
+       * If we detect an older Kernel (i.e., kmd_reported_sram == ~50% of
+       * sys_reported_sram) we just return the values reported by the KMD
+       * since they are already restricted. If we detect a newer Kernel, we
+       * deal with the value below, along with i915.ko (which is expected to
+       * always report 100% of SRAM).
+       */
+      uint64_t ratio = kmd_reported_sram * 10 / sys_reported_sram;
+      assert(ratio <= 11);
+      if (ratio <= 6)
+         return kmd_reported_sram;
+   }
+
+   const char *env_limit = os_get_option("ANV_SYS_MEM_LIMIT");
+   if (env_limit) {
+      int64_t limit_percent = debug_parse_num_option(env_limit, 75);
+      if (limit_percent < 10)
+         limit_percent = 10;
+      else if (limit_percent > 100)
+         limit_percent = 100;
+
+      return kmd_reported_sram * limit_percent / 100;
+   }
+
+   if (kmd_reported_sram <= 4ull * 1024ull * 1024ull * 1024ull)
+      return kmd_reported_sram / 2;
+   else
+      return kmd_reported_sram * 3 / 4;
+}
+
 static VkResult MUST_CHECK
 anv_init_meminfo(struct anv_physical_device *device, int fd)
 {
    const struct intel_device_info *devinfo = &device->info;
 
    device->sys.region = &devinfo->mem.sram.mem;
-   device->sys.size = devinfo->mem.sram.mappable.size;
+   device->sys.size =
+      anv_restrict_sys_heap_size(device, devinfo->mem.sram.mappable.size);
    device->sys.available = devinfo->mem.sram.mappable.free;
 
    device->vram_mappable.region = &devinfo->mem.vram.mem;
@@ -2018,6 +2100,18 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
    default:
       result = anv_i915_physical_device_init_memory_types(device);
       break;
+   }
+
+   if (device->has_protected_contexts) {
+      /* Add a memory type for protected buffers, local and not host
+       * visible.
+       */
+      device->memory.types[device->memory.type_count++] =
+         (struct anv_memory_type) {
+            .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                             VK_MEMORY_PROPERTY_PROTECTED_BIT,
+            .heapIndex = 0,
+      };
    }
 
    assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
@@ -2136,8 +2230,9 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    _mesa_sha1_init(&sha1_ctx);
    _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
    brw_device_sha1_update(&sha1_ctx, &device->info);
-   _mesa_sha1_update(&sha1_ctx, &device->always_use_bindless,
-                     sizeof(device->always_use_bindless));
+   bool always_use_bindless = !!(device->instance->debug & ANV_DEBUG_BINDLESS);
+   _mesa_sha1_update(&sha1_ctx, &always_use_bindless,
+                     sizeof(always_use_bindless));
    _mesa_sha1_final(&sha1_ctx, sha1);
    memcpy(device->pipeline_cache_uuid, sha1, VK_UUID_SIZE);
 
@@ -2178,28 +2273,6 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 #endif
 }
 
-/* The ANV_QUEUE_OVERRIDE environment variable is a comma separated list of
- * queue overrides.
- *
- * To override the number queues:
- *  * "gc" is for graphics queues with compute support
- *  * "g" is for graphics queues with no compute support
- *  * "c" is for compute queues with no graphics support
- *  * "v" is for video queues with no graphics support
- *  * "b" is for copy (blitter) queues with no graphics support
- *
- * For example, ANV_QUEUE_OVERRIDE=gc=2,c=1 would override the number of
- * advertised queues to be 2 queues with graphics+compute support, and 1 queue
- * with compute-only support.
- *
- * ANV_QUEUE_OVERRIDE=c=1 would override the number of advertised queues to
- * include 1 queue with compute-only support, but it will not change the
- * number of graphics+compute queues.
- *
- * ANV_QUEUE_OVERRIDE=gc=0,c=1 would override the number of advertised queues
- * to include 1 queue with compute-only support, and it would override the
- * number of graphics+compute queues to be 0.
- */
 static void
 anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_count, int *blit_count)
 {
@@ -2324,16 +2397,20 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          };
       }
       if (c_count > 0) {
+         /* TODO: CCS don't support MI_SET_APPID instruction, that might be
+          * the reason some tests protected memory tests fail on CCS.
+          * Re-enable it if a workaround/solution is found.
+          */
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
             .queueFlags = VK_QUEUE_COMPUTE_BIT |
                           VK_QUEUE_TRANSFER_BIT |
-                          sparse_flags |
-                          protected_flag,
+                          sparse_flags,
             .queueCount = c_count,
             .engine_class = compute_class,
          };
       }
-      if (v_count > 0 && (pdevice->video_decode_enabled || pdevice->video_encode_enabled)) {
+      if (v_count > 0 && ((pdevice->instance->debug & ANV_DEBUG_VIDEO_DECODE) ||
+                          (pdevice->instance->debug & ANV_DEBUG_VIDEO_ENCODE))) {
          /* HEVC support on Gfx9 is only available on VCS0. So limit the number of video queues
           * to the first VCS engine instance.
           *
@@ -2346,8 +2423,10 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
           */
          /* TODO: enable protected content on video queue */
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
-            .queueFlags = (pdevice->video_decode_enabled ? VK_QUEUE_VIDEO_DECODE_BIT_KHR : 0) |
-                          (pdevice->video_encode_enabled ? VK_QUEUE_VIDEO_ENCODE_BIT_KHR : 0),
+            .queueFlags = ((pdevice->instance->debug & ANV_DEBUG_VIDEO_DECODE) ?
+                           VK_QUEUE_VIDEO_DECODE_BIT_KHR : 0) |
+                          ((pdevice->instance->debug & ANV_DEBUG_VIDEO_ENCODE) ?
+                           VK_QUEUE_VIDEO_ENCODE_BIT_KHR : 0),
             .queueCount = pdevice->info.ver == 9 ? MIN2(1, v_count) : v_count,
             .engine_class = INTEL_ENGINE_CLASS_VIDEO,
          };
@@ -2522,9 +2601,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    if (result != VK_SUCCESS)
       goto fail_base;
 
-   if (debug_get_bool_option("ANV_QUEUE_THREAD_DISABLE", false))
-      device->has_exec_timeline = false;
-
    device->has_cooperative_matrix =
       device->info.cooperative_matrix_configurations[0].scope != INTEL_CMAT_SCOPE_NONE;
 
@@ -2556,15 +2632,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
 
    device->vk.pipeline_cache_import_ops = anv_cache_import_ops;
 
-   device->always_use_bindless =
-      debug_get_bool_option("ANV_ALWAYS_BINDLESS", false);
-
-   device->use_call_secondary =
-      !debug_get_bool_option("ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
-
-   device->video_decode_enabled = debug_get_bool_option("ANV_VIDEO_DECODE", false);
-   device->video_encode_enabled = debug_get_bool_option("ANV_VIDEO_ENCODE", false);
-
    device->uses_ex_bso = device->info.verx10 >= 125;
 
    /* For now always use indirect descriptors. We'll update this
@@ -2585,9 +2652,9 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->uses_relocs = device->info.kmd_type != INTEL_KMD_TYPE_XE;
 
    /* While xe.ko can use both vm_bind and TR-TT, i915.ko only has TR-TT. */
-   if (debug_get_bool_option("ANV_SPARSE", true)) {
+   if (!(instance->debug & ANV_DEBUG_NO_SPARSE)) {
       if (device->info.kmd_type == INTEL_KMD_TYPE_XE) {
-         if (debug_get_bool_option("ANV_SPARSE_USE_TRTT", false))
+         if (instance->debug & ANV_DEBUG_SPARSE_TRTT)
             device->sparse_type = ANV_SPARSE_TYPE_TRTT;
          else
             device->sparse_type = ANV_SPARSE_TYPE_VM_BIND;
@@ -2620,6 +2687,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->isl_dev.buffer_length_in_aux_addr = !intel_needs_workaround(device->isl_dev.info, 14019708328);
    device->isl_dev.sampler_route_to_lsc =
       driQueryOptionb(&instance->dri_options, "intel_sampler_route_to_lsc");
+   device->isl_dev.l1_storage_wt =
+      driQueryOptionb(&instance->dri_options, "intel_storage_cache_policy_wt");
 
    result = anv_physical_device_init_uuids(device);
    if (result != VK_SUCCESS)
@@ -2726,7 +2795,7 @@ anv_physical_device_destroy(struct vk_physical_device *vk_device)
    vk_free(&device->instance->vk.alloc, device);
 }
 
-static const VkQueueFamilyProperties
+static VkQueueFamilyProperties
 get_anv_queue_family_properties_template(const struct anv_physical_device *device)
 {
 

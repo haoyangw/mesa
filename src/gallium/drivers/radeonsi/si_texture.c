@@ -231,9 +231,9 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */
-         surface->u.gfx9.color.dcc_number_type = ac_get_cb_number_type(format);
-         surface->u.gfx9.color.dcc_data_format = ac_get_cb_format(sscreen->info.gfx_level, format);
-         surface->u.gfx9.color.dcc_write_compress_disable = false;
+         surface->u.gfx9.dcc_number_type = ac_get_cb_number_type(format);
+         surface->u.gfx9.dcc_data_format = ac_get_cb_format(sscreen->info.gfx_level, format);
+         surface->u.gfx9.dcc_write_compress_disable = false;
       }
 
       if (modifier == DRM_FORMAT_MOD_INVALID &&
@@ -791,9 +791,9 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
       }
 
       /* Move a suballocated texture into a non-suballocated allocation. */
-      if (sscreen->ws->buffer_is_suballocated(res->buf) || tex->surface.tile_swizzle ||
-          (tex->buffer.flags & RADEON_FLAG_NO_INTERPROCESS_SHARING &&
-           sscreen->info.has_local_buffers)) {
+      if (sscreen->ws->buffer_is_suballocated(res->buf) ||
+          sscreen->ws->buffer_has_vm_always_valid(res->buf) ||
+          tex->surface.tile_swizzle) {
          assert(!res->b.is_shared);
          si_reallocate_texture_inplace(sctx, tex, PIPE_BIND_SHARED, false);
          flush = true;
@@ -868,31 +868,18 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
       /* Buffer exports are for the OpenCL interop. */
       /* Move a suballocated buffer into a non-suballocated allocation. */
       if (sscreen->ws->buffer_is_suballocated(res->buf) ||
-          /* A DMABUF export always fails if the BO is local. */
-          (tex->buffer.flags & RADEON_FLAG_NO_INTERPROCESS_SHARING &&
-           sscreen->info.has_local_buffers)) {
+          sscreen->ws->buffer_has_vm_always_valid(res->buf)) {
          assert(!res->b.is_shared);
 
          /* Allocate a new buffer with PIPE_BIND_SHARED. */
-         struct pipe_resource templ = res->b.b;
-         templ.bind |= PIPE_BIND_SHARED;
-
-         struct pipe_resource *newb = screen->resource_create(screen, &templ);
-         if (!newb) {
+         if (!si_reallocate_buffer_change_flags(sctx, &res->b.b, res->b.b.usage,
+                                                res->b.b.bind | PIPE_BIND_SHARED)) {
             if (!ctx)
                si_put_aux_context_flush(&sscreen->aux_context.general);
             return false;
          }
 
-         /* Copy the old buffer contents to the new one. */
-         struct pipe_box box;
-         u_box_1d(0, newb->width0, &box);
-         sctx->b.resource_copy_region(&sctx->b, newb, 0, 0, 0, 0, &res->b.b, 0, &box);
          flush = true;
-         /* Move the new buffer storage to the old pipe_resource. */
-         si_replace_buffer_storage(&sctx->b, &res->b.b, newb, 0, 0, 0);
-         pipe_resource_reference(&newb, NULL);
-
          assert(res->b.b.bind & PIPE_BIND_SHARED);
          assert(res->flags & RADEON_FLAG_NO_SUBALLOC);
       }
@@ -1304,10 +1291,12 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
 
    /* Execute the clears. */
    if (num_clears) {
-      struct si_context *sctx = si_get_aux_context(&sscreen->aux_context.compute_resource_init);
+      struct si_aux_context *auxctx = tex->buffer.flags & RADEON_FLAG_ENCRYPTED ?
+         &sscreen->aux_context.general : &sscreen->aux_context.compute_resource_init;
+      struct si_context *sctx = si_get_aux_context(auxctx);
 
       si_execute_clears(sctx, clears, num_clears, false);
-      si_put_aux_context_flush(&sscreen->aux_context.compute_resource_init);
+      si_put_aux_context_flush(auxctx);
    }
 
    /* Initialize the CMASK base register value. */
@@ -2063,9 +2052,7 @@ static void *si_texture_transfer_map(struct pipe_context *ctx, struct pipe_resou
          use_staging_texture =
             tex->buffer.domains & RADEON_DOMAIN_VRAM || tex->buffer.flags & RADEON_FLAG_GTT_WC;
       /* Write & linear only: */
-      else if (si_cs_is_buffer_referenced(sctx, tex->buffer.buf, RADEON_USAGE_READWRITE) ||
-               !sctx->ws->buffer_wait(sctx->ws, tex->buffer.buf, 0,
-                                      RADEON_USAGE_READWRITE | RADEON_USAGE_DISALLOW_SLOW_REPLY)) {
+      else if (!si_is_buffer_idle(sctx, &tex->buffer, RADEON_USAGE_READWRITE)) {
          /* It's busy. */
          if (si_can_invalidate_texture(sctx->screen, tex, usage, box))
             si_texture_invalidate_storage(sctx, tex);
@@ -2311,8 +2298,6 @@ static struct pipe_surface *si_create_surface(struct pipe_context *pipe, struct 
    pipe_resource_reference(&surface->base.texture, tex);
    surface->base.context = pipe;
    surface->base.format = templ->format;
-   surface->base.width = width;
-   surface->base.height = height;
    surface->base.u = templ->u;
 
    surface->width0 = width0;

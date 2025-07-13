@@ -322,8 +322,8 @@ void
 renderer_bind_destination(struct xa_context *r,
 			  struct pipe_surface *surface)
 {
-    int width = surface->width;
-    int height = surface->height;
+    uint16_t width, height;
+    pipe_surface_size(surface, &width, &height);
 
     struct pipe_framebuffer_state fb;
     struct pipe_viewport_state viewport;
@@ -333,8 +333,7 @@ renderer_bind_destination(struct xa_context *r,
     /* Framebuffer uses actual surface width/height
      */
     memset(&fb, 0, sizeof fb);
-    fb.width = surface->width;
-    fb.height = surface->height;
+    pipe_surface_size(surface, &fb.width, &fb.height);
     fb.nr_cbufs = 1;
     fb.cbufs[0] = surface;
     fb.zsbuf = NULL;
@@ -447,8 +446,8 @@ renderer_copy_prepare(struct xa_context *r,
 	u_sampler_view_default_template(&templ,
 					src_texture, src_texture->format);
 	src_view = pipe->create_sampler_view(pipe, src_texture, &templ);
-	pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 1, 0, false, &src_view);
-	pipe_sampler_view_reference(&src_view, NULL);
+	pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 1, 0, &src_view);
+	pipe->sampler_view_release(pipe, src_view);
     }
 
     /* shaders */

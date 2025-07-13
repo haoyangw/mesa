@@ -8,6 +8,7 @@
 #include "ac_nir.h"
 #include "ac_nir_to_llvm.h"
 #include "ac_rtld.h"
+#include "nir.h"
 #include "si_pipe.h"
 #include "si_shader_internal.h"
 #include "si_shader_llvm.h"
@@ -455,7 +456,7 @@ static void si_build_wrapper_function(struct si_shader_context *ctx,
        * block.
        */
 
-      /* Second part params are same as the preceeding params of the first part. */
+      /* Second part params are same as the preceding params of the first part. */
       num_params = LLVMCountParams(parts[1].value);
    }
 
@@ -490,6 +491,7 @@ static LLVMValueRef si_llvm_load_sampler_desc(struct ac_shader_abi *abi, LLVMVal
    struct si_shader_context *ctx = si_shader_context_from_abi(abi);
    LLVMBuilderRef builder = ctx->ac.builder;
 
+   /* This is only used by divergent sampler and image indexing to build the waterfall loop. */
    if (index && LLVMTypeOf(index) == ctx->ac.i32) {
       bool is_vec4 = false;
 
@@ -499,8 +501,8 @@ static LLVMValueRef si_llvm_load_sampler_desc(struct ac_shader_abi *abi, LLVMVal
          index = LLVMBuildMul(builder, index, LLVMConstInt(ctx->ac.i32, 2, 0), "");
          break;
       case AC_DESC_BUFFER:
-         /* The buffer is in [4:7]. */
-         index = ac_build_imad(&ctx->ac, index, LLVMConstInt(ctx->ac.i32, 4, 0), ctx->ac.i32_1);
+         /* The buffer is in [0:3]. */
+         index = LLVMBuildMul(builder, index, LLVMConstInt(ctx->ac.i32, 4, 0), "");
          is_vec4 = true;
          break;
       case AC_DESC_FMASK:

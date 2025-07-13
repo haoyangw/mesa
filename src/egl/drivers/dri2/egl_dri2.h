@@ -140,14 +140,6 @@ struct dri2_egl_display_vtbl {
                                           const EGLint *rects, EGLint n_rects);
 
    /* optional */
-   EGLBoolean (*swap_buffers_region)(_EGLDisplay *disp, _EGLSurface *surf,
-                                     EGLint numRects, const EGLint *rects);
-
-   /* optional */
-   EGLBoolean (*post_sub_buffer)(_EGLDisplay *disp, _EGLSurface *surf, EGLint x,
-                                 EGLint y, EGLint width, EGLint height);
-
-   /* optional */
    EGLBoolean (*copy_buffers)(_EGLDisplay *disp, _EGLSurface *surf,
                               void *native_pixmap_target);
 
@@ -219,12 +211,6 @@ struct dmabuf_feedback {
 };
 #endif
 
-enum dri2_egl_driver_fail {
-   DRI2_EGL_DRIVER_LOADED = 0,
-   DRI2_EGL_DRIVER_FAILED = 1,
-   DRI2_EGL_DRIVER_PREFER_ZINK = 2,
-};
-
 struct dri2_egl_display {
    const struct dri2_egl_display_vtbl *vtbl;
 
@@ -256,7 +242,6 @@ struct dri2_egl_display {
 
    bool has_compression_modifiers;
    bool own_device;
-   bool invalidate_available;
    bool kopper;
    bool kopper_without_modifiers;
    bool swrast;
@@ -450,7 +435,6 @@ dri2_egl_error_unlock(struct dri2_egl_display *dri2_dpy, EGLint err,
 }
 
 extern const __DRIimageLookupExtension image_lookup_extension;
-extern const __DRIuseInvalidateExtension use_invalidate;
 extern const __DRIbackgroundCallableExtension background_callable_extension;
 extern const __DRIswrastLoaderExtension swrast_pbuffer_loader_extension;
 
@@ -513,14 +497,21 @@ dri2_create_image_from_dri(_EGLDisplay *disp, struct dri_image *dri_image);
 
 #ifdef HAVE_X11_PLATFORM
 EGLBoolean
-dri2_initialize_x11(_EGLDisplay *disp);
+dri2_initialize_x11_dri2(_EGLDisplay *disp);
+EGLBoolean
+dri2_initialize_x11(_EGLDisplay *disp, bool *allow_dri2);
 void
 dri2_teardown_x11(struct dri2_egl_display *dri2_dpy);
 unsigned int
 dri2_x11_get_red_mask_for_depth(struct dri2_egl_display *dri2_dpy, int depth);
 #else
 static inline EGLBoolean
-dri2_initialize_x11(_EGLDisplay *disp)
+dri2_initialize_x11_dri2(_EGLDisplay *disp)
+{
+   return _eglError(EGL_NOT_INITIALIZED, "X11 platform not built");
+}
+static inline EGLBoolean
+dri2_initialize_x11(_EGLDisplay *disp, bool *allow_dri2)
 {
    return _eglError(EGL_NOT_INITIALIZED, "X11 platform not built");
 }
@@ -622,7 +613,7 @@ void
 dri2_display_destroy(_EGLDisplay *disp);
 
 struct dri2_egl_display *
-dri2_display_create(void);
+dri2_display_create(_EGLDisplay *disp);
 
 EGLBoolean
 dri2_init_surface(_EGLSurface *surf, _EGLDisplay *disp, EGLint type,

@@ -40,6 +40,15 @@
     - !reference [.venus-rules, rules]
     - !reference [.zink-common-rules, rules]
 
+.zink-venus-lvp-manual-rules:
+  stage: layered-backends-postmerge
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.lavapipe-manual-rules, rules]
+    - !reference [.venus-manual-rules, rules]
+    - !reference [.zink-common-manual-rules, rules]
+
 .zink-anv-rules:
   stage: layered-backends
   rules:
@@ -100,7 +109,7 @@
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
-    - !reference [.valve-freedreno-turnip-manual-rules, rules]
+    - !reference [.valve-turnip-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
 .zink-radv-rules:
@@ -138,6 +147,7 @@
     # trace replay, instead.
     # https://gitlab.freedesktop.org/mesa/mesa/-/issues/6753
     HWCI_START_XORG: ""
+    HWCI_TEST_SCRIPT: "/install/piglit/piglit-traces.sh"
     WAFFLE_PLATFORM: gbm
     PIGLIT_PLATFORM: gbm
 
@@ -145,6 +155,8 @@
   extends:
     - .zink-lvp-rules
     - .zink-test
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
   variables:
     LIBGL_ALWAYS_SOFTWARE: "true"
     LVP_POISON_MEMORY: "1"
@@ -168,22 +180,33 @@
     CROSVM_VK_DRIVER: "lvp"
     CROSVM_GPU_ARGS: "vulkan=true,gles=false,backend=virglrenderer,egl=true,surfaceless=true,fixed-blob-mapping=false"
   tags:
-    - kvm
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
 
 .zink-anv-adl-test:
   extends:
-    - .lava-acer-cbv514-1h-34uz-brya:x86_64
     - .anv-test
+    - .lava-acer-cbv514-1h-34uz-brya:x86_64
     - .zink-anv-rules
     - .zink-test
   variables:
     VK_DRIVER: intel
     GPU_VERSION: zink-anv-adl
 
+.zink-anv-adl-trace-test:
+  extends:
+    - .lava-piglit-traces:x86_64
+    - .anv-test
+    - .lava-acer-n20q11-r856ltn-p1s2-nissa:x86_64
+    - .zink-anv-rules
+    - .zink-trace-test
+  variables:
+    VK_DRIVER: intel
+    GPU_VERSION: zink-anv-adl
+
 .zink-anv-tgl-test:
   extends:
-    - .lava-acer-cp514-2h-1160g7-volteer:x86_64
     - .anv-test
+    - .lava-acer-cp514-2h-1160g7-volteer:x86_64
     - .zink-anv-rules
     - .zink-test
   variables:
@@ -193,14 +216,10 @@
 .zink-anv-tgl-trace-test:
   extends:
     - .lava-piglit-traces:x86_64
-    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
     - .anv-test
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
     - .zink-anv-rules
     - .zink-trace-test
-    # Add .lava-traces-base again to override .anv-test setting the
-    # HWCI_TEST_SCRIPT, but .lava-piglit-traces having to come first to get
-    # dependencies right.
-    - .lava-traces-base
   variables:
     VK_DRIVER: intel
     GPU_VERSION: zink-anv-tgl

@@ -260,7 +260,7 @@ static void
 build_process_cs_cmd_seq(nir_builder *b, struct nvk_nir_push *p,
                          nir_def *in_addr, nir_def *seq_idx,
                          struct process_cmd_in *in,
-                         struct nvk_physical_device *pdev,
+                         const struct nvk_physical_device *pdev,
                          const VkIndirectCommandsLayoutCreateInfoEXT *info,
                          uint32_t *qmd_size_per_seq_B_out)
 {
@@ -379,10 +379,13 @@ build_process_cs_cmd_seq(nir_builder *b, struct nvk_nir_push *p,
             assert(cb0_layout.addr_hi_start == cb0_layout.addr_lo_start + 32);
             const uint32_t cb0_addr_lo_dw = cb0_layout.addr_lo_start / 32;
             const uint32_t cb0_addr_hi_dw = cb0_layout.addr_hi_start / 32;
-            qmd_repl[cb0_addr_lo_dw] = nir_unpack_64_2x32_split_x(b, root_addr);
+            nir_def *root_addr_shifted =
+               nir_ushr_imm(b, root_addr, cb0_layout.addr_shift);
+            qmd_repl[cb0_addr_lo_dw] =
+               nir_unpack_64_2x32_split_x(b, root_addr_shifted);
             qmd_repl[cb0_addr_hi_dw] =
                nir_ior(b, load_global_dw(b, shader_qmd_addr, cb0_addr_hi_dw),
-                          nir_unpack_64_2x32_split_y(b, root_addr));
+                          nir_unpack_64_2x32_split_y(b, root_addr_shifted));
 
             copy_repl_global_dw(b, qmd_addr, shader_qmd_addr,
                                 qmd_repl, ARRAY_SIZE(qmd_repl));
@@ -430,7 +433,7 @@ build_process_cs_cmd_seq(nir_builder *b, struct nvk_nir_push *p,
 static void
 build_gfx_set_exec(nir_builder *b, struct nvk_nir_push *p, nir_def *token_addr,
                    struct process_cmd_in *in,
-                   struct nvk_physical_device *pdev,
+                   const struct nvk_physical_device *pdev,
                    const VkIndirectCommandsExecutionSetTokenEXT *token)
 {
    switch (token->type) {
@@ -636,7 +639,7 @@ static void
 build_process_gfx_cmd_seq(nir_builder *b, struct nvk_nir_push *p,
                           nir_def *in_addr, nir_def *seq_idx,
                           struct process_cmd_in *in,
-                          struct nvk_physical_device *pdev,
+                          const struct nvk_physical_device *pdev,
                           const VkIndirectCommandsLayoutCreateInfoEXT *info)
 {
    for (uint32_t t = 0; t < info->tokenCount; t++) {
@@ -735,7 +738,7 @@ build_process_shader(struct nvk_device *dev,
                      uint32_t *cmd_seq_stride_B_out,
                      uint32_t *qmd_size_per_seq_B_out)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    nir_builder build =
       nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL,
@@ -926,7 +929,7 @@ nvk_GetGeneratedCommandsMemoryRequirementsEXT(
    VK_FROM_HANDLE(nvk_device, dev, _device);
    VK_FROM_HANDLE(nvk_indirect_commands_layout, layout,
                   pInfo->indirectCommandsLayout);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint64_t size = layout->cmd_seq_stride_B * (uint64_t)pInfo->maxSequenceCount;
    if (layout->qmd_size_per_seq_B > 0) {

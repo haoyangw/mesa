@@ -3,6 +3,8 @@
 
 use crate::from_nir::*;
 use crate::ir::{ShaderInfo, ShaderIoInfo, ShaderModel, ShaderStageInfo};
+use crate::sm20::ShaderModel20;
+use crate::sm32::ShaderModel32;
 use crate::sm50::ShaderModel50;
 use crate::sm70::ShaderModel70;
 use crate::sph;
@@ -20,11 +22,13 @@ use std::sync::OnceLock;
 
 #[repr(u8)]
 enum DebugFlags {
+    Panic,
     Print,
     Serial,
     Spill,
     Annotate,
     NoUgpr,
+    Cycles,
 }
 
 pub struct Debug {
@@ -44,11 +48,13 @@ impl Debug {
         let mut flags = 0;
         for flag in debug_str.split(',') {
             match flag.trim() {
+                "panic" => flags |= 1 << DebugFlags::Panic as u8,
                 "print" => flags |= 1 << DebugFlags::Print as u8,
                 "serial" => flags |= 1 << DebugFlags::Serial as u8,
                 "spill" => flags |= 1 << DebugFlags::Spill as u8,
                 "annotate" => flags |= 1 << DebugFlags::Annotate as u8,
                 "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
+                "cycles" => flags |= 1 << DebugFlags::Cycles as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -58,6 +64,10 @@ impl Debug {
 
 pub trait GetDebugFlags {
     fn debug_flags(&self) -> u32;
+
+    fn panic(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Panic as u8) != 0
+    }
 
     fn print(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Print as u8) != 0
@@ -77,6 +87,10 @@ pub trait GetDebugFlags {
 
     fn no_ugpr(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::NoUgpr as u8) != 0
+    }
+
+    fn cycles(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::Cycles as u8) != 0
     }
 }
 
@@ -106,6 +120,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.lower_fsqrt = dev.sm < 52;
     op.lower_bitfield_extract = dev.sm >= 70;
     op.lower_bitfield_insert = true;
+    op.lower_pack_64_4x16 = true;
     op.lower_pack_half_2x16 = true;
     op.lower_pack_unorm_2x16 = true;
     op.lower_pack_snorm_2x16 = true;
@@ -238,7 +253,13 @@ impl ShaderBin {
             },
             num_control_barriers: info.num_control_barriers,
             _pad0: Default::default(),
+            max_warps_per_sm: info.max_warps_per_sm,
             num_instrs: info.num_instrs,
+            num_static_cycles: info.num_static_cycles,
+            num_spills_to_mem: info.num_spills_to_mem,
+            num_fills_from_mem: info.num_fills_from_mem,
+            num_spills_to_reg: info.num_spills_to_reg,
+            num_fills_from_reg: info.num_fills_from_reg,
             slm_size: info.slm_size,
             crs_size: sm.crs_size(info.max_crs_depth),
             __bindgen_anon_1: match &info.stage {
@@ -313,6 +334,12 @@ impl ShaderBin {
 
             eprintln!("Stage: {}", stage_name);
             eprintln!("Instruction count: {}", c_info.num_instrs);
+            eprintln!("Static cycle count: {}", c_info.num_static_cycles);
+            eprintln!("Max warps/SM: {}", c_info.max_warps_per_sm);
+            eprintln!("Spills to mem: {}", c_info.num_spills_to_mem);
+            eprintln!("Spills to reg: {}", c_info.num_spills_to_reg);
+            eprintln!("Fills from mem: {}", c_info.num_fills_from_mem);
+            eprintln!("Fills from reg: {}", c_info.num_fills_from_reg);
             eprintln!("Num GPRs: {}", c_info.num_gprs);
             eprintln!("SLM size: {}", c_info.slm_size);
 
@@ -397,6 +424,10 @@ fn nak_compile_shader_internal(
         Box::new(ShaderModel70::new(nak.sm))
     } else if nak.sm >= 50 {
         Box::new(ShaderModel50::new(nak.sm))
+    } else if nak.sm >= 32 {
+        Box::new(ShaderModel32::new(nak.sm))
+    } else if nak.sm >= 20 {
+        Box::new(ShaderModel20::new(nak.sm))
     } else {
         panic!("Unsupported shader model");
     };
@@ -427,6 +458,7 @@ fn nak_compile_shader_internal(
 
     s.remove_annotations();
 
+    pass!(s, opt_instr_sched_postpass);
     pass!(s, calc_instr_deps);
 
     s.gather_info();
@@ -450,8 +482,12 @@ pub extern "C" fn nak_compile_shader(
     robust2_modes: nir_variable_mode,
     fs_key: *const nak_fs_key,
 ) -> *mut nak_shader_bin {
-    panic::catch_unwind(|| {
+    let compile = || {
         nak_compile_shader_internal(nir, dump_asm, nak, robust2_modes, fs_key)
-    })
-    .unwrap_or(std::ptr::null_mut())
+    };
+    if DEBUG.panic() {
+        compile()
+    } else {
+        panic::catch_unwind(compile).unwrap_or(std::ptr::null_mut())
+    }
 }

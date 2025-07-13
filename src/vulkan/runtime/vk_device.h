@@ -32,6 +32,7 @@
 #include "util/list.h"
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
+#include "util/u_sync_provider.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,11 @@ enum vk_queue_submit_mode {
     * `VK_QUEUE_SUBMIT_MODE_THREADED`.
     */
    VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND,
+};
+
+struct vk_device_memory_report {
+   PFN_vkDeviceMemoryReportCallbackEXT callback;
+   void *data;
 };
 
 /** Base struct for VkDevice */
@@ -236,7 +242,7 @@ struct vk_device {
                                       struct vk_sync **sync_out);
 
    /* Set by vk_device_set_drm_fd() */
-   int drm_fd;
+   struct util_sync_provider *sync;
 
    /** Implicit pipeline cache, or NULL */
    struct vk_pipeline_cache *mem_cache;
@@ -313,6 +319,9 @@ struct vk_device {
 
    /* For VK_KHR_pipeline_binary */
    bool disable_internal_cache;
+
+   struct vk_device_memory_report *memory_reports;
+   uint32_t memory_report_count;
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_device, base, VkDevice,
@@ -347,7 +356,7 @@ vk_device_init(struct vk_device *device,
 static inline void
 vk_device_set_drm_fd(struct vk_device *device, int drm_fd)
 {
-   device->drm_fd = drm_fd;
+   device->sync = util_sync_provider_drm(drm_fd);
 }
 
 /** Tears down a vk_device

@@ -45,6 +45,7 @@
 #include "util/u_surface.h"
 #include "util/u_transfer.h"
 #include "util/u_transfer_helper.h"
+#include "util/perf/cpu_trace.h"
 
 #include "decode.h"
 #include "pan_bo.h"
@@ -66,6 +67,11 @@ panfrost_clear_depth_stencil(struct pipe_context *pipe,
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
 
+   /* Legalize here because it could trigger a recursive blit otherwise */
+   struct panfrost_resource *rdst = pan_resource(dst->texture);
+   enum pipe_format dst_view_format = util_format_linear(dst->format);
+   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
+
    panfrost_blitter_save(
       ctx, render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE);
    util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth,
@@ -84,10 +90,40 @@ panfrost_clear_render_target(struct pipe_context *pipe,
    if (render_condition_enabled && !panfrost_render_condition_check(ctx))
       return;
 
+   /* Legalize here because it could trigger a recursive blit otherwise */
+   struct panfrost_resource *rdst = pan_resource(dst->texture);
+   enum pipe_format dst_view_format = util_format_linear(dst->format);
+   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
+
    panfrost_blitter_save(
-      ctx, render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE);
+      ctx, (render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE) | PAN_SAVE_FRAGMENT_CONSTANT);
    util_blitter_clear_render_target(ctx->blitter, dst, color, dstx, dsty, width,
                                     height);
+}
+
+static void
+panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
+{
+   MESA_TRACE_FUNC();
+
+   struct panfrost_device *dev = pan_device(screen);
+   struct panfrost_resource *rsrc = (struct panfrost_resource *)pt;
+
+   if (rsrc->scanout)
+      renderonly_scanout_destroy(rsrc->scanout, dev->ro);
+
+   if (rsrc->shadow_image)
+      pipe_resource_reference(
+         (struct pipe_resource **)&rsrc->shadow_image, NULL);
+
+   if (rsrc->bo)
+      panfrost_bo_unreference(rsrc->bo);
+
+   free(rsrc->index_cache);
+   free(rsrc->damage.tile_map.data);
+
+   util_range_destroy(&rsrc->valid_buffer_range);
+   free(rsrc);
 }
 
 static struct pipe_resource *
@@ -110,6 +146,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
    *prsc = *templat;
 
    pipe_reference_init(&prsc->reference, 1);
+   util_range_init(&rsc->valid_buffer_range);
    prsc->screen = pscreen;
 
    uint64_t mod = whandle->modifier == DRM_FORMAT_MOD_INVALID
@@ -139,7 +176,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
       pan_image_layout_init(dev->arch, &rsc->image.layout, &explicit_layout);
 
    if (!valid) {
-      FREE(rsc);
+      panfrost_resource_destroy(pscreen, &rsc->base);
       return NULL;
    }
 
@@ -148,7 +185,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
     * memory space to mmap it etc.
     */
    if (!rsc->bo) {
-      FREE(rsc);
+      panfrost_resource_destroy(pscreen, &rsc->base);
       return NULL;
    }
 
@@ -259,22 +296,14 @@ panfrost_create_surface(struct pipe_context *pipe, struct pipe_resource *pt,
 
       if (pt->target != PIPE_BUFFER) {
          assert(surf_tmpl->u.tex.level <= pt->last_level);
-         ps->width = u_minify(pt->width0, surf_tmpl->u.tex.level);
-         ps->height = u_minify(pt->height0, surf_tmpl->u.tex.level);
          ps->nr_samples = surf_tmpl->nr_samples;
          ps->u.tex.level = surf_tmpl->u.tex.level;
          ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
          ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
       } else {
-         /* setting width as number of elements should get us correct
-          * renderbuffer width */
-         ps->width =
-            surf_tmpl->u.buf.last_element - surf_tmpl->u.buf.first_element + 1;
-         ps->height = pt->height0;
          ps->u.buf.first_element = surf_tmpl->u.buf.first_element;
          ps->u.buf.last_element = surf_tmpl->u.buf.last_element;
          assert(ps->u.buf.first_element <= ps->u.buf.last_element);
-         assert(ps->u.buf.last_element < ps->width);
       }
    }
 
@@ -730,6 +759,8 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
                                        const struct pipe_resource *template,
                                        uint64_t modifier)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_device *dev = pan_device(screen);
 
    struct panfrost_resource *so = CALLOC_STRUCT(panfrost_resource);
@@ -825,7 +856,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
 
       if (!so->scanout) {
          mesa_loge("Failed to create scanout resource\n");
-         FREE(so);
+         panfrost_resource_destroy(screen, &so->base);
          return NULL;
       }
       assert(handle.type == WINSYS_HANDLE_TYPE_FD);
@@ -833,7 +864,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
       close(handle.handle);
 
       if (!so->bo) {
-         FREE(so);
+         panfrost_resource_destroy(screen, &so->base);
          return NULL;
       }
 
@@ -851,7 +882,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
          panfrost_bo_create(dev, so->image.layout.data_size, flags, label);
 
       if (!so->bo) {
-         FREE(so);
+         panfrost_resource_destroy(screen, &so->base);
          return NULL;
       }
 
@@ -862,7 +893,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
 
    if (drm_is_afbc(so->image.layout.modifier)) {
       if (panfrost_resource_init_afbc_headers(so)) {
-         FREE(so);
+         panfrost_resource_destroy(screen, &so->base);
          return NULL;
       }
    }
@@ -903,29 +934,6 @@ panfrost_resource_create_with_modifiers(struct pipe_screen *screen,
    /* If we didn't find one, app specified invalid */
    assert(count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID);
    return panfrost_resource_create(screen, template);
-}
-
-static void
-panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
-{
-   struct panfrost_device *dev = pan_device(screen);
-   struct panfrost_resource *rsrc = (struct panfrost_resource *)pt;
-
-   if (rsrc->scanout)
-      renderonly_scanout_destroy(rsrc->scanout, dev->ro);
-
-   if (rsrc->shadow_image)
-         pipe_resource_reference(
-            (struct pipe_resource **)&rsrc->shadow_image, NULL);
-
-   if (rsrc->bo)
-      panfrost_bo_unreference(rsrc->bo);
-
-   free(rsrc->index_cache);
-   free(rsrc->damage.tile_map.data);
-
-   util_range_destroy(&rsrc->valid_buffer_range);
-   free(rsrc);
 }
 
 /* Most of the time we can do CPU-side transfers, but sometimes we need to use
@@ -1220,6 +1228,8 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
                  const struct pipe_box *box,
                  struct pipe_transfer **out_transfer)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_context *ctx = pan_context(pctx);
    struct panfrost_device *dev = pan_device(pctx->screen);
    struct panfrost_resource *rsrc = pan_resource(resource);
@@ -1456,6 +1466,8 @@ pan_resource_modifier_convert(struct panfrost_context *ctx,
                               struct panfrost_resource *rsrc, uint64_t modifier,
                               bool copy_resource, const char *reason)
 {
+   MESA_TRACE_FUNC();
+
    bool need_shadow = rsrc->modifier_constant;
 
    assert(!rsrc->modifier_constant || copy_resource);
@@ -1691,6 +1703,8 @@ void
 panfrost_pack_afbc(struct panfrost_context *ctx,
                    struct panfrost_resource *prsrc)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct panfrost_bo *metadata_bo;
@@ -1819,6 +1833,8 @@ panfrost_pack_afbc(struct panfrost_context *ctx,
 static void
 panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
 {
+   MESA_TRACE_FUNC();
+
    /* Gallium expects writeback here, so we tile */
 
    struct panfrost_context *ctx = pan_context(pctx);

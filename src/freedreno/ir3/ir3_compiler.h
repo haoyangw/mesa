@@ -54,6 +54,8 @@ struct ir3_compiler_options {
 
    /* "dual_color_blend_by_location" workaround is enabled: */
    bool dual_color_blend_by_location;
+
+   uint64_t uche_trap_base;
 };
 
 struct ir3_compiler {
@@ -126,6 +128,9 @@ struct ir3_compiler {
 
    /* The maximum number of constants, in vec4's, for compute shaders. */
    uint16_t max_const_compute;
+
+   /* See freedreno_dev_info::compute_lb_size. */
+   uint32_t compute_lb_size;
 
    /* Number of instructions that the shader's base address and length
     * (instrlen divides instruction count by this) must be aligned to.
@@ -427,6 +432,10 @@ ir3_shader_debug_hash_key()
         IR3_DBG_DISASM | IR3_DBG_OPTMSGS | IR3_DBG_NOCACHE |
         IR3_DBG_SHADER_INTERNAL | IR3_DBG_SCHEDMSGS | IR3_DBG_RAMSGS));
 }
+
+/* Returns a pointer to internal static tmp buffer. */
+const char *
+ir3_shader_debug_as_string(void);
 
 ENDC;
 

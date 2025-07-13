@@ -208,16 +208,14 @@ get_sampler_desc(nir_builder *b, apply_layout_state *state, nir_deref_instr *der
     * index or if all samplers in the array are the same. Note that indexing is forbidden with
     * embedded samplers.
     */
-   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset &&
-       (!indirect || binding->immutable_samplers_equal)) {
+   if (desc_type == AC_DESC_SAMPLER && binding->immutable_samplers_offset && !indirect) {
       unsigned constant_index = 0;
-      if (!binding->immutable_samplers_equal) {
-         while (deref->deref_type != nir_deref_type_var) {
-            assert(deref->deref_type == nir_deref_type_array);
-            unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
-            constant_index += nir_src_as_uint(deref->arr.index) * array_size;
-            deref = nir_deref_instr_parent(deref);
-         }
+
+      while (deref->deref_type != nir_deref_type_var) {
+         assert(deref->deref_type == nir_deref_type_array);
+         unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
+         constant_index += nir_src_as_uint(deref->arr.index) * array_size;
+         deref = nir_deref_instr_parent(deref);
       }
 
       uint32_t dword0_mask =
@@ -409,7 +407,7 @@ load_push_constant(nir_builder *b, apply_layout_state *state, nir_intrinsic_inst
    return nir_extract_bits(b, data, num_loads, 0, intrin->def.num_components, bit_size);
 }
 
-static void
+static bool
 apply_layout_to_intrin(nir_builder *b, apply_layout_state *state, nir_intrinsic_instr *intrin)
 {
    b->cursor = nir_before_instr(&intrin->instr);
@@ -454,11 +452,13 @@ apply_layout_to_intrin(nir_builder *b, apply_layout_state *state, nir_intrinsic_
       break;
    }
    default:
-      break;
+      return false;
    }
+
+   return true;
 }
 
-static void
+static bool
 apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *tex)
 {
    b->cursor = nir_before_instr(&tex->instr);
@@ -526,7 +526,7 @@ apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *te
 
    if (tex->op == nir_texop_descriptor_amd) {
       nir_def_replace(&tex->def, image);
-      return;
+      return true;
    }
 
    for (unsigned i = 0; i < tex->num_srcs; i++) {
@@ -543,11 +543,14 @@ apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *te
          break;
       }
    }
+
+   return true;
 }
 
-void
+bool
 radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *device, const struct radv_shader_stage *stage)
 {
+   bool progress = false;
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
@@ -556,33 +559,31 @@ radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *device, c
       .address32_hi = pdev->info.address32_hi,
       .disable_aniso_single_level = instance->drirc.disable_aniso_single_level,
       .has_image_load_dcc_bug = pdev->info.has_image_load_dcc_bug,
-      .disable_tg4_trunc_coord = !pdev->info.conformant_trunc_coord && !device->disable_trunc_coord,
+      .disable_tg4_trunc_coord = !pdev->info.conformant_trunc_coord && !instance->drirc.disable_trunc_coord,
       .args = &stage->args,
       .info = &stage->info,
       .layout = &stage->layout,
    };
 
-   nir_builder b;
-
-   nir_foreach_function (function, shader) {
-      if (!function->impl)
-         continue;
-
-      b = nir_builder_create(function->impl);
+   nir_foreach_function_impl (impl, shader) {
+      bool impl_progress = false;
+      nir_builder b = nir_builder_create(impl);
 
       /* Iterate in reverse so load_ubo lowering can look at
        * the vulkan_resource_index to tell if it's an inline
        * ubo.
        */
-      nir_foreach_block_reverse (block, function->impl) {
+      nir_foreach_block_reverse (block, impl) {
          nir_foreach_instr_reverse_safe (instr, block) {
             if (instr->type == nir_instr_type_tex)
-               apply_layout_to_tex(&b, &state, nir_instr_as_tex(instr));
+               impl_progress |= apply_layout_to_tex(&b, &state, nir_instr_as_tex(instr));
             else if (instr->type == nir_instr_type_intrinsic)
-               apply_layout_to_intrin(&b, &state, nir_instr_as_intrinsic(instr));
+               impl_progress |= apply_layout_to_intrin(&b, &state, nir_instr_as_intrinsic(instr));
          }
       }
 
-      nir_metadata_preserve(function->impl, nir_metadata_control_flow);
+      progress |= nir_progress(impl_progress, impl, nir_metadata_control_flow);
    }
+
+   return progress;
 }

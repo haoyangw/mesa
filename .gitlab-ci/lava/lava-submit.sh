@@ -47,12 +47,12 @@ ROOTFS_URL="$(get_path_to_artifact lava-rootfs.tar.zst)"
 rm -rf results
 mkdir -p results/job-rootfs-overlay/
 
-artifacts/ci-common/generate-env.sh > results/job-rootfs-overlay/set-job-env-vars.sh
+artifacts/ci-common/export-gitlab-job-env-for-dut.sh > results/job-rootfs-overlay/set-job-env-vars.sh
 cp artifacts/ci-common/init-*.sh results/job-rootfs-overlay/
 cp "$SCRIPTS_DIR"/setup-test-env.sh results/job-rootfs-overlay/
 
 tar zcf job-rootfs-overlay.tar.gz -C results/job-rootfs-overlay/ .
-s3_upload job-rootfs-overlay.tar.gz "https://${JOB_ARTIFACTS_BASE}"
+s3_upload job-rootfs-overlay.tar.gz "https://${JOB_ARTIFACTS_BASE}/"
 
 # Prepare env vars for upload.
 section_switch variables "Environment variables passed through to device:"
@@ -62,6 +62,9 @@ section_switch lava_submit "Submitting job for scheduling"
 
 touch results/lava.log
 tail -f results/lava.log &
+# Ensure that we are printing the commands that are being executed,
+# making it easier to debug the job in case it fails.
+set -x
 PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 	--farm "${FARM}" \
 	--device-type "${DEVICE_TYPE}" \
@@ -95,6 +98,12 @@ PYTHONPATH=artifacts/ artifacts/lava/lava_job_submitter.py \
 		--name=job-overlay \
 		--url="https://${JOB_ROOTFS_OVERLAY_PATH}" \
 		--compression=gz \
+		--path="/" \
+		--format=tar \
+	- append-overlay \
+		--name=extra-modules \
+		--url="${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/modules.tar.zst" \
+		--compression=zstd \
 		--path="/" \
 		--format=tar \
 	- submit \

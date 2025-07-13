@@ -43,8 +43,15 @@ begin_debug_marker(VkCommandBuffer commandBuffer,
       step;
    switch (step) {
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP:
+   {
+      va_list args;
+      va_start(args, format);
+      cmd_buffer->state.rt.num_tlas = va_arg(args, uint32_t);
+      cmd_buffer->state.rt.num_blas = va_arg(args, uint32_t);
+      va_end(args);
       trace_intel_begin_as_build(&cmd_buffer->trace);
       break;
+   }
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_BUILD_LEAVES:
       trace_intel_begin_as_build_leaves(&cmd_buffer->trace);
       break;
@@ -61,8 +68,15 @@ begin_debug_marker(VkCommandBuffer commandBuffer,
       trace_intel_begin_as_ploc_build_internal(&cmd_buffer->trace);
       break;
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_ENCODE:
+   {
+      va_list args;
+      va_start(args, format);
+      cmd_buffer->state.rt.num_leaves = va_arg(args, uint32_t);
+      cmd_buffer->state.rt.num_ir_nodes = va_arg(args, uint32_t);
+      va_end(args);
       trace_intel_begin_as_encode(&cmd_buffer->trace);
       break;
+   }
    default:
       unreachable("Invalid build step");
    }
@@ -76,7 +90,9 @@ end_debug_marker(VkCommandBuffer commandBuffer)
    cmd_buffer->state.rt.debug_marker_count--;
    switch (cmd_buffer->state.rt.debug_markers[cmd_buffer->state.rt.debug_marker_count]) {
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP:
-      trace_intel_end_as_build(&cmd_buffer->trace);
+      trace_intel_end_as_build(&cmd_buffer->trace,
+                               cmd_buffer->state.rt.num_tlas,
+                               cmd_buffer->state.rt.num_blas);
       break;
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_BUILD_LEAVES:
       trace_intel_end_as_build_leaves(&cmd_buffer->trace);
@@ -94,7 +110,7 @@ end_debug_marker(VkCommandBuffer commandBuffer)
       trace_intel_end_as_ploc_build_internal(&cmd_buffer->trace);
       break;
    case VK_ACCELERATION_STRUCTURE_BUILD_STEP_ENCODE:
-      trace_intel_end_as_encode(&cmd_buffer->trace);
+      trace_intel_end_as_encode(&cmd_buffer->trace, cmd_buffer->state.rt.num_leaves, cmd_buffer->state.rt.num_ir_nodes);
       break;
    default:
       unreachable("Invalid build step");
@@ -541,8 +557,7 @@ anv_init_header(VkCommandBuffer commandBuffer,
       uint32_t *header_ptr = (uint32_t *)((char *)&header + base);
 
       struct anv_address addr = anv_address_from_u64(header_addr + base);
-      anv_cmd_buffer_update_addr(cmd_buffer, addr, 0, header_size,
-                                 header_ptr, false);
+      anv_cmd_buffer_update_addr(cmd_buffer, addr, header_size, header_ptr);
    }
 
    if (INTEL_DEBUG(DEBUG_BVH_ANY)) {
@@ -749,7 +764,7 @@ genX(CmdCopyAccelerationStructureKHR)(
    }
 
    anv_genX(cmd_buffer->device->info, CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct anv_accel_struct_header,
                              copy_dispatch_size));
 
@@ -820,7 +835,7 @@ genX(CmdCopyAccelerationStructureToMemoryKHR)(
    }
 
    anv_genX(device->info, CmdDispatchIndirect)(
-      commandBuffer, src->buffer,
+      commandBuffer, vk_buffer_to_handle(src->buffer),
       src->offset + offsetof(struct anv_accel_struct_header,
                              copy_dispatch_size));
 

@@ -508,7 +508,7 @@ brw_alu2(struct brw_codegen *p, unsigned opcode,
    return insn;
 }
 
-static enum gfx10_align1_3src_vertical_stride
+static enum brw_align1_3src_vertical_stride
 to_3src_align1_vstride(const struct intel_device_info *devinfo,
                        enum brw_vertical_stride vstride)
 {
@@ -531,8 +531,20 @@ to_3src_align1_vstride(const struct intel_device_info *devinfo,
    }
 }
 
+static enum brw_align1_3src_dst_horizontal_stride
+to_3src_align1_dst_hstride(enum brw_horizontal_stride hstride)
+{
+   switch (hstride) {
+   case BRW_HORIZONTAL_STRIDE_1:
+      return BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_1;
+   case BRW_HORIZONTAL_STRIDE_2:
+      return BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_2;
+   default:
+      unreachable("invalid hstride");
+   }
+}
 
-static enum gfx10_align1_3src_src_horizontal_stride
+static enum brw_align1_3src_src_horizontal_stride
 to_3src_align1_hstride(enum brw_horizontal_stride hstride)
 {
    switch (hstride) {
@@ -596,9 +608,10 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
       brw_eu_inst_set_3src_a1_dst_reg_file(devinfo, inst, phys_file(dest));
       brw_eu_inst_set_3src_dst_reg_nr(devinfo, inst, phys_nr(devinfo, dest));
       brw_eu_inst_set_3src_a1_dst_subreg_nr(devinfo, inst, phys_subnr(devinfo, dest) / 8);
-      brw_eu_inst_set_3src_a1_dst_hstride(devinfo, inst, BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_1);
+      brw_eu_inst_set_3src_a1_dst_hstride(devinfo, inst,
+                                          to_3src_align1_dst_hstride(dest.hstride));
 
-      if (brw_type_is_float(dest.type)) {
+      if (brw_type_is_float_or_bfloat(dest.type)) {
          brw_eu_inst_set_3src_a1_exec_type(devinfo, inst,
                                         BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT);
       } else {
@@ -758,7 +771,7 @@ brw_dpas_three_src(struct brw_codegen *p, enum opcode opcode,
    brw_eu_inst_set_dpas_3src_dst_reg_nr(devinfo, inst, phys_nr(devinfo, dest));
    brw_eu_inst_set_dpas_3src_dst_subreg_nr(devinfo, inst, phys_subnr(devinfo, dest));
 
-   if (brw_type_is_float(dest.type)) {
+   if (brw_type_is_float_or_bfloat(dest.type)) {
       brw_eu_inst_set_dpas_3src_exec_type(devinfo, inst,
                                        BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT);
    } else {
@@ -1512,7 +1525,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
       brw_eu_inst_set_send_sel_reg32_ex_desc(devinfo, send, 1);
       brw_eu_inst_set_send_ex_desc_ia_subreg_nr(devinfo, send, phys_subnr(devinfo, ex_desc) >> 2);
 
-      if (devinfo->ver >= 20 && sfid == GFX12_SFID_UGM)
+      if (devinfo->ver >= 20 && sfid == BRW_SFID_UGM)
          brw_eu_inst_set_bits(send, 103, 99, ex_mlen / reg_unit(devinfo));
    }
 
@@ -1522,7 +1535,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
        *
        * BSpec 56890
        */
-      if (devinfo->ver < 20 || sfid != GFX12_SFID_UGM)
+      if (devinfo->ver < 20 || sfid != BRW_SFID_UGM)
          brw_eu_inst_set_send_ex_bso(devinfo, send, true);
       brw_eu_inst_set_send_src1_len(devinfo, send, ex_mlen / reg_unit(devinfo));
    }
@@ -1608,8 +1621,7 @@ brw_find_loop_end(struct brw_codegen *p, int start_offset)
 	    return offset;
       }
    }
-   assert(!"not reached");
-   return start_offset;
+   unreachable("not reached");
 }
 
 /* After program generation, go back and update the UIP and JIP of
@@ -1686,122 +1698,6 @@ brw_set_uip_jip(struct brw_codegen *p, int start_offset)
          break;
       }
    }
-}
-
-static void
-brw_set_memory_fence_message(struct brw_codegen *p,
-                             struct brw_eu_inst *insn,
-                             enum brw_message_target sfid,
-                             bool commit_enable,
-                             unsigned bti)
-{
-   const struct intel_device_info *devinfo = p->devinfo;
-
-   brw_set_desc(p, insn, brw_message_desc(
-                   devinfo, 1, (commit_enable ? 1 : 0), true), false);
-
-   brw_eu_inst_set_sfid(devinfo, insn, sfid);
-
-   switch (sfid) {
-   case GFX6_SFID_DATAPORT_RENDER_CACHE:
-      brw_eu_inst_set_dp_msg_type(devinfo, insn, GFX7_DATAPORT_RC_MEMORY_FENCE);
-      break;
-   case GFX7_SFID_DATAPORT_DATA_CACHE:
-      brw_eu_inst_set_dp_msg_type(devinfo, insn, GFX7_DATAPORT_DC_MEMORY_FENCE);
-      break;
-   default:
-      unreachable("Not reached");
-   }
-
-   if (commit_enable)
-      brw_eu_inst_set_dp_msg_control(devinfo, insn, 1 << 5);
-
-   assert(devinfo->ver >= 11 || bti == 0);
-   brw_eu_inst_set_binding_table_index(devinfo, insn, bti);
-}
-
-static void
-gfx12_set_memory_fence_message(struct brw_codegen *p,
-                               struct brw_eu_inst *insn,
-                               enum brw_message_target sfid,
-                               uint32_t desc)
-{
-   const unsigned mlen = 1 * reg_unit(p->devinfo); /* g0 header */
-    /* Completion signaled by write to register. No data returned. */
-   const unsigned rlen = 1 * reg_unit(p->devinfo);
-
-   brw_eu_inst_set_sfid(p->devinfo, insn, sfid);
-
-   /* On Gfx12.5 URB is not listed as port usable for fences with the LSC (see
-    * BSpec 53578 for Gfx12.5, BSpec 57330 for Gfx20), so we completely ignore
-    * the descriptor value and rebuild a legacy URB fence descriptor.
-    */
-   if (sfid == BRW_SFID_URB && p->devinfo->ver < 20) {
-      brw_set_desc(p, insn, brw_urb_fence_desc(p->devinfo) |
-                            brw_message_desc(p->devinfo, mlen, rlen, true),
-                   false);
-   } else {
-      enum lsc_fence_scope scope = lsc_fence_msg_desc_scope(p->devinfo, desc);
-      enum lsc_flush_type flush_type = lsc_fence_msg_desc_flush_type(p->devinfo, desc);
-
-      if (sfid == GFX12_SFID_TGM) {
-         scope = LSC_FENCE_TILE;
-         flush_type = LSC_FLUSH_TYPE_EVICT;
-      }
-
-      /* Wa_14012437816:
-       *
-       *   "For any fence greater than local scope, always set flush type to
-       *    at least invalidate so that fence goes on properly."
-       *
-       *   "The bug is if flush_type is 'None', the scope is always downgraded
-       *    to 'local'."
-       *
-       * Here set scope to NONE_6 instead of NONE, which has the same effect
-       * as NONE but avoids the downgrade to scope LOCAL.
-       */
-      if (intel_needs_workaround(p->devinfo, 14012437816) &&
-          scope > LSC_FENCE_LOCAL &&
-          flush_type == LSC_FLUSH_TYPE_NONE) {
-         flush_type = LSC_FLUSH_TYPE_NONE_6;
-      }
-
-      brw_set_desc(p, insn, lsc_fence_msg_desc(p->devinfo, scope,
-                                               flush_type, false) |
-                            brw_message_desc(p->devinfo, mlen, rlen, false),
-                   false);
-   }
-}
-
-void
-brw_memory_fence(struct brw_codegen *p,
-                 struct brw_reg dst,
-                 struct brw_reg src,
-                 enum opcode send_op,
-                 enum brw_message_target sfid,
-                 uint32_t desc,
-                 bool commit_enable,
-                 unsigned bti)
-{
-   const struct intel_device_info *devinfo = p->devinfo;
-
-   dst = retype(vec1(dst), BRW_TYPE_UW);
-   src = retype(vec1(src), BRW_TYPE_UD);
-
-   /* Set dst as destination for dependency tracking, the MEMORY_FENCE
-    * message doesn't write anything back.
-    */
-   struct brw_eu_inst *insn = next_insn(p, send_op);
-   brw_eu_inst_set_mask_control(devinfo, insn, BRW_MASK_DISABLE);
-   brw_eu_inst_set_exec_size(devinfo, insn, BRW_EXECUTE_1);
-   brw_set_dest(p, insn, dst);
-   brw_set_src0(p, insn, src);
-
-   /* All DG2 hardware requires LSC for fence messages, even A-step */
-   if (devinfo->has_lsc)
-      gfx12_set_memory_fence_message(p, insn, sfid, desc);
-   else
-      brw_set_memory_fence_message(p, insn, sfid, commit_enable, bti);
 }
 
 void

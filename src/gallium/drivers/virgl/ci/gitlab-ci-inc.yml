@@ -48,6 +48,7 @@
   extends:
     - .test-gl
     - .virgl-rules
+  timeout: 15m
   variables:
     GALLIVM_PERF: nopt
     FLAKES_CHANNEL: "#virgl-ci"
@@ -60,6 +61,7 @@
   extends:
     - .test-gl
     - .virgl-rules
+  timeout: 15m
   variables:
     FLAKES_CHANNEL: "#virgl-ci"
     GALLIUM_DRIVER: "virgl"
@@ -83,5 +85,4 @@
     CROSVM_GALLIUM_DRIVER: iris
     CROSVM_GPU_ARGS: "gles=false,backend=virglrenderer,egl=true,surfaceless=true"
     EGL_PLATFORM: surfaceless
-    PIGLIT_PROFILES: replay
     PIGLIT_TRACES_FILE: traces-virgl-iris.yml

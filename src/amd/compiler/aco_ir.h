@@ -1015,6 +1015,13 @@ private:
 struct RegisterDemand {
    constexpr RegisterDemand() = default;
    constexpr RegisterDemand(const int16_t v, const int16_t s) noexcept : vgpr{v}, sgpr{s} {}
+   constexpr RegisterDemand(Temp t) noexcept
+   {
+      if (t.regClass().type() == RegType::sgpr)
+         sgpr = t.size();
+      else
+         vgpr = t.size();
+   }
    int16_t vgpr = 0;
    int16_t sgpr = 0;
 
@@ -2319,9 +2326,7 @@ int get_op_fixed_to_def(Instruction* instr);
 /* utilities for dealing with register demand */
 RegisterDemand get_live_changes(Instruction* instr);
 RegisterDemand get_temp_registers(Instruction* instr);
-
-/* number of sgprs that need to be allocated but might notbe addressable as s0-s105 */
-uint16_t get_extra_sgprs(Program* program);
+RegisterDemand get_temp_reg_changes(Instruction* instr);
 
 /* adjust num_waves for workgroup size and LDS limits */
 uint16_t max_suitable_waves(Program* program, uint16_t waves);
@@ -2331,8 +2336,7 @@ uint16_t get_sgpr_alloc(Program* program, uint16_t addressable_sgprs);
 uint16_t get_vgpr_alloc(Program* program, uint16_t addressable_vgprs);
 
 /* return number of addressable sgprs/vgprs for max_waves */
-uint16_t get_addr_sgpr_from_waves(Program* program, uint16_t max_waves);
-uint16_t get_addr_vgpr_from_waves(Program* program, uint16_t max_waves);
+RegisterDemand get_addr_regs_from_waves(Program* program, uint16_t waves);
 
 bool uses_scratch(Program* program);
 

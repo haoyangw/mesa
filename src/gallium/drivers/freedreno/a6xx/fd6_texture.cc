@@ -22,6 +22,9 @@
 #include "fd6_screen.h"
 #include "fd6_texture.h"
 
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
 static void fd6_texture_state_destroy(struct fd6_texture_state *state);
 
 static void
@@ -475,14 +478,13 @@ static void
 fd6_set_sampler_views(struct pipe_context *pctx, enum pipe_shader_type shader,
                       unsigned start, unsigned nr,
                       unsigned unbind_num_trailing_slots,
-                      bool take_ownership,
                       struct pipe_sampler_view **views)
    in_dt
 {
    struct fd_context *ctx = fd_context(pctx);
 
    fd_set_sampler_views(pctx, shader, start, nr, unbind_num_trailing_slots,
-                        take_ownership, views);
+                        views);
 
    if (!views)
       return;

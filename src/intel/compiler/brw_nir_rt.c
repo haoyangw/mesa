@@ -144,13 +144,7 @@ lower_rt_io_derefs(nir_shader *shader)
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 /** Lowers ray-tracing shader I/O and scratch access
@@ -331,13 +325,7 @@ lower_ray_walk_intrinsics(nir_shader *shader,
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_none);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_none);
 }
 
 void
@@ -495,7 +483,8 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
    struct brw_nir_compiler_opts opts = {};
    brw_preprocess_nir(compiler, nir, &opts);
 
-   NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, devinfo);
+   struct brw_cs_prog_key key = {};
+   NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, &key.base, devinfo);
 
    b = nir_builder_create(nir_shader_get_entrypoint(b.shader));
    /* brw_nir_lower_rt_intrinsics will leave us with a btd_global_arg_addr

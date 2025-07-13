@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include "compiler/nir/nir.h"
 #include "util/hash_table.h"
+#include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 
 /* Indices for named (non-XFB) varyings that are present. These are packed
@@ -95,8 +96,6 @@ unsigned pan_lookup_pushed_ubo(struct panfrost_ubo_push *push, unsigned ubo,
                                unsigned offs);
 
 struct panfrost_compile_inputs {
-   struct util_debug_callback *debug;
-
    unsigned gpu_id;
    bool is_blend, is_blit;
    struct {
@@ -198,6 +197,8 @@ struct pan_shader_info {
    unsigned tls_size;
    unsigned wls_size;
 
+   struct panfrost_stats stats, stats_idvs_varying;
+
    /* Bit mask of preloaded registers */
    uint64_t preload;
 
@@ -279,6 +280,9 @@ struct pan_shader_info {
 
    /* Floating point controls that the driver should try to honour */
    bool ftz_fp16, ftz_fp32;
+
+   /* True if the shader contains a shader_clock instruction. */
+   bool has_shader_clk_instr;
 
    unsigned sampler_count;
    unsigned texture_count;
@@ -395,6 +399,15 @@ void pan_print_alu_type(nir_alu_type t, FILE *fp);
 #define PAN_WRITEOUT_S 4
 #define PAN_WRITEOUT_2 8
 
+/* Specify the mediump lowering behavior for pan_nir_collect_varyings */
+enum pan_mediump_vary {
+   /* Always assign a 32-bit format to mediump varyings */
+   PAN_MEDIUMP_VARY_32BIT,
+   /* Assign a 16-bit format to varyings with smooth interpolation, and a
+    * 32-bit format to varyings with flat interpolation */
+   PAN_MEDIUMP_VARY_SMOOTH_16BIT,
+};
+
 bool pan_nir_lower_zs_store(nir_shader *nir);
 bool pan_nir_lower_store_component(nir_shader *shader);
 
@@ -415,7 +428,8 @@ bool pan_lower_xfb(nir_shader *nir);
 bool pan_lower_image_index(nir_shader *shader, unsigned vs_img_attrib_offset);
 
 uint32_t pan_nir_collect_noperspective_varyings_fs(nir_shader *s);
-void pan_nir_collect_varyings(nir_shader *s, struct pan_shader_info *info);
+void pan_nir_collect_varyings(nir_shader *s, struct pan_shader_info *info,
+                              enum pan_mediump_vary mediump);
 
 /*
  * Helper returning the subgroup size. Generally, this is equal to the number of

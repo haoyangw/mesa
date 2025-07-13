@@ -55,7 +55,9 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
                             const VkDescriptorImageInfo *const info,
                             void *dst, size_t dst_size)
 {
-   struct nvk_sampled_image_descriptor desc[3] = { };
+   struct nvk_sampled_image_descriptor desc[NVK_MAX_IMAGE_PLANES] = { };
+   STATIC_ASSERT(NVK_MAX_SAMPLER_PLANES <= NVK_MAX_IMAGE_PLANES);
+
    uint8_t plane_count = 1;
 
    if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER &&
@@ -165,7 +167,7 @@ write_storage_image_view_desc(struct nvk_descriptor_set *set,
 }
 
 static union nvk_buffer_descriptor
-ubo_desc(struct nvk_physical_device *pdev,
+ubo_desc(const struct nvk_physical_device *pdev,
          struct nvk_addr_range addr_range)
 {
    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
@@ -190,7 +192,7 @@ ubo_desc(struct nvk_physical_device *pdev,
 }
 
 static void
-write_ubo_desc(struct nvk_physical_device *pdev,
+write_ubo_desc(const struct nvk_physical_device *pdev,
                struct nvk_descriptor_set *set,
                const VkDescriptorBufferInfo *const info,
                uint32_t binding, uint32_t elem)
@@ -204,7 +206,7 @@ write_ubo_desc(struct nvk_physical_device *pdev,
 }
 
 static void
-write_dynamic_ubo_desc(struct nvk_physical_device *pdev,
+write_dynamic_ubo_desc(const struct nvk_physical_device *pdev,
                        struct nvk_descriptor_set *set,
                        const VkDescriptorBufferInfo *const info,
                        uint32_t binding, uint32_t elem)
@@ -279,7 +281,7 @@ get_edb_buffer_view_desc(struct nvk_device *dev,
 }
 
 static void
-write_buffer_view_desc(struct nvk_physical_device *pdev,
+write_buffer_view_desc(const struct nvk_physical_device *pdev,
                        struct nvk_descriptor_set *set,
                        const VkBufferView bufferView,
                        uint32_t binding, uint32_t elem)
@@ -316,7 +318,7 @@ nvk_UpdateDescriptorSets(VkDevice device,
                          const VkCopyDescriptorSet *pDescriptorCopies)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    for (uint32_t w = 0; w < descriptorWriteCount; w++) {
       const VkWriteDescriptorSet *write = &pDescriptorWrites[w];
@@ -443,7 +445,7 @@ nvk_push_descriptor_set_update(struct nvk_device *dev,
                                uint32_t write_count,
                                const VkWriteDescriptorSet *writes)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    assert(layout->non_variable_descriptor_buffer_size < sizeof(push_set->data));
    struct nvk_descriptor_set set = {
@@ -552,7 +554,7 @@ nvk_CreateDescriptorPool(VkDevice _device,
                          VkDescriptorPool *pDescriptorPool)
 {
    VK_FROM_HANDLE(nvk_device, dev, _device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nvk_descriptor_pool *pool;
    VkResult result;
 
@@ -609,7 +611,7 @@ nvk_CreateDescriptorPool(VkDevice _device,
    if (mem_size > 0) {
       if (pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT) {
          pool->host_mem = vk_zalloc2(&dev->vk.alloc, pAllocator, mem_size,
-                                     16, VK_OBJECT_TYPE_DESCRIPTOR_POOL);
+                                     16, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
          if (pool->host_mem == NULL) {
             nvk_destroy_descriptor_pool(dev, pAllocator, pool);
             return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -700,7 +702,7 @@ nvk_descriptor_set_create(struct nvk_device *dev,
                           uint32_t variable_count,
                           struct nvk_descriptor_set **out_set)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nvk_descriptor_set *set;
    VkResult result;
 
@@ -859,7 +861,7 @@ nvk_descriptor_set_write_template(struct nvk_device *dev,
                                   const struct vk_descriptor_update_template *template,
                                   const void *data)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    for (uint32_t i = 0; i < template->entry_count; i++) {
       const struct vk_descriptor_template_entry *entry =
@@ -998,7 +1000,7 @@ nvk_GetDescriptorEXT(VkDevice _device,
                      size_t dataSize, void *pDescriptor)
 {
    VK_FROM_HANDLE(nvk_device, dev, _device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    switch (pDescriptorInfo->type) {
    case VK_DESCRIPTOR_TYPE_SAMPLER: {

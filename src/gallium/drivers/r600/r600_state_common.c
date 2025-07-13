@@ -388,7 +388,21 @@ static void r600_bind_rs_state(struct pipe_context *ctx, void *state)
 		r600_mark_atom_dirty(rctx, &rctx->clip_misc_state.atom);
 	}
 
-	r600_viewport_set_rast_deps(&rctx->b, rs->scissor_enable, rs->clip_halfz);
+	if (r600_prim_is_lines(rctx->current_rast_prim))
+		r600_set_clip_discard_distance(&rctx->b, rs->line_width);
+	else if (rctx->current_rast_prim == MESA_PRIM_POINTS)
+		r600_set_clip_discard_distance(&rctx->b, rs->max_point_size);
+
+	if (rctx->b.scissor_enabled != rs->scissor_enable) {
+		rctx->b.scissor_enabled = rs->scissor_enable;
+		rctx->b.scissors.dirty_mask = (1 << R600_MAX_VIEWPORTS) - 1;
+		rctx->b.set_atom_dirty(&rctx->b, &rctx->b.scissors.atom, true);
+	}
+	if (rctx->b.clip_halfz != rs->clip_halfz) {
+		rctx->b.clip_halfz = rs->clip_halfz;
+		rctx->b.viewports.depth_range_dirty_mask = (1 << R600_MAX_VIEWPORTS) - 1;
+		rctx->b.set_atom_dirty(&rctx->b, &rctx->b.viewports.atom, true);
+	}
 
 	/* Re-emit PA_SC_LINE_STIPPLE. */
 	rctx->last_primitive_type = -1;
@@ -620,7 +634,6 @@ static void r600_set_sampler_views(struct pipe_context *pipe,
 				   enum pipe_shader_type shader,
 				   unsigned start, unsigned count,
 				   unsigned unbind_num_trailing_slots,
-				   bool take_ownership,
 				   struct pipe_sampler_view **views)
 {
 	struct r600_context *rctx = (struct r600_context *) pipe;
@@ -654,10 +667,6 @@ static void r600_set_sampler_views(struct pipe_context *pipe,
 
 	for (i = 0; i < count; i++) {
 		if (rviews[i] == dst->views.views[i]) {
-			if (take_ownership) {
-				struct pipe_sampler_view *view = views[i];
-				pipe_sampler_view_reference(&view, NULL);
-			}
 			continue;
 		}
 
@@ -688,12 +697,7 @@ static void r600_set_sampler_views(struct pipe_context *pipe,
 				dirty_sampler_states_mask |= 1 << i;
 			}
 
-			if (take_ownership) {
-				pipe_sampler_view_reference((struct pipe_sampler_view **)&dst->views.views[i], NULL);
-				dst->views.views[i] = (struct r600_pipe_sampler_view*)views[i];
-			} else {
-				pipe_sampler_view_reference((struct pipe_sampler_view **)&dst->views.views[i], views[i]);
-			}
+			pipe_sampler_view_reference((struct pipe_sampler_view **)&dst->views.views[i], views[i]);
 			new_mask |= 1 << i;
 			r600_context_add_resource_size(pipe, views[i]->texture);
 		} else {
@@ -2206,9 +2210,23 @@ static void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info 
 		return;
 	}
 
-	rctx->current_rast_prim = (rctx->gs_shader)? rctx->gs_shader->gs_output_prim
-		: (rctx->tes_shader)? rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE]
+	const enum mesa_prim rast_prim = rctx->current_rast_prim;
+
+	rctx->current_rast_prim = rctx->gs_shader ? rctx->gs_shader->gs_output_prim
+		: rctx->tes_shader ? rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE]
 		: info->mode;
+
+	if (rast_prim != rctx->current_rast_prim) {
+		if (rctx->current_rast_prim == MESA_PRIM_POINTS) {
+			r600_set_clip_discard_distance(&rctx->b, rctx->rasterizer->max_point_size);
+		} else if (r600_prim_is_lines(rctx->current_rast_prim)) {
+			r600_set_clip_discard_distance(&rctx->b, rctx->rasterizer->line_width);
+		} else if (rctx->current_rast_prim == R600_PRIM_RECTANGLE_LIST) {
+			/* Don't change the clip discard distance for rectangles. */
+		} else {
+			r600_set_clip_discard_distance(&rctx->b, 0);
+		}
+	}
 
 	if (rctx->b.gfx_level >= EVERGREEN) {
 		evergreen_emit_atomic_buffer_setup_count(rctx, NULL, combined_atomics, &atomic_used_mask);
@@ -2261,7 +2279,7 @@ static void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info 
 			index_offset -= start_offset;
 			has_user_indices = false;
 		}
-		index_bias = draws->index_bias;
+		index_bias = unlikely(indirect) ? 0 : draws->index_bias;
 	} else {
 		index_bias = indirect ? 0 : draws[0].start;
 	}
@@ -2286,8 +2304,27 @@ static void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info 
 		r600_mark_atom_dirty(rctx, &rctx->cb_misc_state.atom);
 	}
 
-	if (rctx->b.gfx_level >= EVERGREEN)
-		evergreen_setup_tess_constants(rctx, info, &num_patches);
+	if (rctx->b.gfx_level >= EVERGREEN) {
+		const bool vertexid = rctx->vs_shader->current->shader.vs_vertexid;
+
+		if (unlikely(indirect && vertexid)) {
+			const uint32_t indirect_offset =
+				indirect->offset + (info->index_size ?
+						    3 * sizeof(uint32_t) :
+						    2 * sizeof(uint32_t));
+			uint8_t *indirect_data =
+				r600_buffer_map_sync_with_rings(&rctx->b,
+								(struct r600_resource *)indirect->buffer,
+								PIPE_MAP_READ);
+
+			rctx->lds_constant_buffer.vertexid_base =
+				*(uint32_t *)(indirect_data + indirect_offset);
+		} else {
+			rctx->lds_constant_buffer.vertexid_base = 0;
+		}
+
+		evergreen_setup_tess_constants(rctx, info, &num_patches, vertexid);
+	}
 
 	/* Emit states. */
 	r600_need_cs_space(rctx, has_user_indices ? 5 : 0, true, util_bitcount(atomic_used_mask));
@@ -3474,6 +3511,7 @@ void r600_init_common_state_functions(struct r600_context *rctx)
 	rctx->b.b.set_vertex_buffers = r600_set_vertex_buffers;
 	rctx->b.b.set_sampler_views = r600_set_sampler_views;
 	rctx->b.b.sampler_view_destroy = r600_sampler_view_destroy;
+	rctx->b.b.sampler_view_release = u_default_sampler_view_release;
 	rctx->b.b.memory_barrier = r600_memory_barrier;
 	rctx->b.b.texture_barrier = r600_texture_barrier;
 	rctx->b.b.set_stream_output_targets = r600_set_streamout_targets;

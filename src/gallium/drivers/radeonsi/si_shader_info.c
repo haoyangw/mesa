@@ -9,6 +9,7 @@
 #include "util/mesa-sha1.h"
 #include "sid.h"
 #include "nir.h"
+#include "nir_tcs_info.h"
 #include "nir_xfb_info.h"
 #include "aco_interface.h"
 #include "ac_nir.h"
@@ -483,11 +484,12 @@ static void scan_instruction(const struct nir_shader *nir, struct si_shader_info
 void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                         struct si_shader_info *info, bool colors_lowered)
 {
-   bool force_use_aco = false;
-   if (sscreen->force_shader_use_aco) {
-      if (!memcmp(sscreen->use_aco_shader_blake, nir->info.source_blake3,
-                  sizeof(sscreen->use_aco_shader_blake))) {
+   bool force_use_aco = sscreen->use_aco_shader_type == nir->info.stage;
+   for (unsigned i = 0; i < sscreen->num_use_aco_shader_blakes; i++) {
+      if (!memcmp(sscreen->use_aco_shader_blakes[i], nir->info.source_blake3,
+                  sizeof(blake3_hash))) {
          force_use_aco = true;
+         break;
       }
    }
 
@@ -627,7 +629,7 @@ void si_nir_scan_shader(struct si_screen *sscreen, struct nir_shader *nir,
                                    info->uses_linear_centroid || info->uses_linear_sample ||
                                    info->uses_interp_at_sample || nir->info.writes_memory ||
                                    nir->info.fs.uses_fbfetch_output ||
-                                   nir->info.fs.needs_quad_helper_invocations ||
+                                   nir->info.fs.needs_coarse_quad_helper_invocations ||
                                    BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) ||
                                    BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_POINT_COORD) ||
                                    BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_ID) ||

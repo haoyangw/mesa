@@ -214,13 +214,13 @@ static const __DRIimageLoaderExtension image_loader_extension = {
 
 static const __DRIextension *image_loader_extensions[] = {
    &image_loader_extension.base,  &image_lookup_extension.base,
-   &use_invalidate.base,          &background_callable_extension.base,
+   &background_callable_extension.base,
    &kopper_loader_extension.base, NULL,
 };
 
 static const __DRIextension *swrast_loader_extensions[] = {
    &swrast_pbuffer_loader_extension.base, &image_loader_extension.base,
-   &image_lookup_extension.base,          &use_invalidate.base,
+   &image_lookup_extension.base,
    &kopper_loader_extension.base,         NULL,
 };
 
@@ -361,11 +361,7 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
 {
    const char *err;
    bool driver_loaded = false;
-   struct dri2_egl_display *dri2_dpy = dri2_display_create();
-   if (!dri2_dpy)
-      return EGL_FALSE;
-
-   disp->DriverData = (void *)dri2_dpy;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
    /* When ForceSoftware is false, we try the HW driver.  When ForceSoftware
     * is true, we try kms_swrast and swrast in order.
@@ -399,6 +395,5 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
    return EGL_TRUE;
 
 cleanup:
-   dri2_display_destroy(disp);
    return _eglError(EGL_NOT_INITIALIZED, err);
 }

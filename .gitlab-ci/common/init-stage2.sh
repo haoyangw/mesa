@@ -92,9 +92,9 @@ if [ "$HWCI_KVM" = "true" ]; then
     } || \
         modprobe ${KVM_KERNEL_MODULE}
 
-    mkdir -p /lava-files
+    mkdir -p /kernel
     curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
-	-o "/lava-files/${KERNEL_IMAGE_NAME}" \
+	-o "/kernel/${KERNEL_IMAGE_NAME}" \
         "${KERNEL_IMAGE_BASE}/amd64/${KERNEL_IMAGE_NAME}"
 fi
 
@@ -227,10 +227,10 @@ set -x
 # kill the job.
 cleanup
 
-# upload artifacts
+# upload artifacts (lava jobs)
 if [ -n "$S3_RESULTS_UPLOAD" ]; then
   tar --zstd -cf results.tar.zst results/;
-  s3_upload results.tar.zst https://"$S3_RESULTS_UPLOAD"/
+  s3_upload results.tar.zst "https://${S3_RESULTS_UPLOAD}/"
 fi
 
 # We still need to echo the hwci: mesa message, as some scripts rely on it, such

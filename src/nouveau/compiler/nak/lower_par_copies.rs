@@ -63,10 +63,11 @@ impl CopyGraph {
 
 fn copy_needs_tmp(dst: &RegRef, src: &SrcRef) -> bool {
     if let Some(src_reg) = src.as_reg() {
-        (dst.file() == RegFile::Mem && src_reg.file() == RegFile::Mem)
+        (dst.file() == RegFile::Mem && src_reg.file() != RegFile::GPR)
             || (dst.file() == RegFile::Bar && src_reg.file() == RegFile::Bar)
     } else {
-        false
+        // Non-GPR to Mem copies need a temporary
+        dst.file() == RegFile::Mem
     }
 }
 
@@ -109,7 +110,7 @@ fn lower_par_copy(pc: OpParCopy, sm: &dyn ShaderModel) -> MappedInstrs {
     }
 
     for (dst_idx, (_, src)) in pc.dsts_srcs.iter().enumerate() {
-        assert!(src.src_mod.is_none());
+        assert!(src.is_unmodified());
         let src = src.src_ref;
 
         let src_idx = if let SrcRef::Reg(reg) = src {

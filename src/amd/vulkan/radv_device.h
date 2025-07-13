@@ -56,11 +56,12 @@ struct radv_layer_dispatch_tables {
 
 struct radv_device_cache_key {
    uint32_t keep_shader_info : 1;
-   uint32_t disable_trunc_coord : 1;
    uint32_t image_2d_view_of_3d : 1;
    uint32_t mesh_shader_queries : 1;
    uint32_t primitives_generated_query : 1;
    uint32_t trap_excp_flags : 4;
+
+   uint32_t reserved : 24;
 };
 
 enum radv_force_vrs {
@@ -356,8 +357,6 @@ unsigned radv_get_default_max_sample_dist(int log_samples);
 
 void radv_emit_default_sample_locations(const struct radv_physical_device *pdev, struct radeon_cmdbuf *cs,
                                         int nr_samples);
-
-unsigned radv_get_dcc_max_uncompressed_block_size(const struct radv_device *device, const struct radv_image *image);
 
 struct radv_color_buffer_info {
    struct ac_cb_surface ac;

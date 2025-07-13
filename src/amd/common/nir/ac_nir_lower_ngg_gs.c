@@ -631,8 +631,10 @@ ngg_gs_cull_primitive(nir_builder *b, nir_def *tid_in_tg, nir_def *max_vtxcnt,
       /* TODO: support clipdist culling in GS */
       nir_def *accepted_by_clipdist = nir_imm_true(b);
 
-      nir_def *accepted = ac_nir_cull_primitive(
-         b, accepted_by_clipdist, pos, s->num_vertices_per_primitive, NULL, NULL);
+      nir_def *accepted = ac_nir_cull_primitive(b, s->options->skip_viewport_state_culling,
+                                                s->options->use_point_tri_intersection,
+                                                accepted_by_clipdist, pos,
+                                                s->num_vertices_per_primitive, NULL, NULL);
 
       nir_if *if_rejected = nir_push_if(b, nir_inot(b, accepted));
       {
@@ -873,7 +875,7 @@ ngg_gs_finale(nir_builder *b, lower_ngg_gs_state *s)
    ngg_gs_emit_output(b, workgroup_num_vertices, max_prmcnt, tid_in_tg, out_vtx_lds_addr, exporter_tid_in_tg, out_vtx_primflag_0, s);
 }
 
-void
+bool
 ac_nir_lower_ngg_gs(nir_shader *shader, const ac_nir_lower_ngg_options *options)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
@@ -955,10 +957,13 @@ ac_nir_lower_ngg_gs(nir_shader *shader, const ac_nir_lower_ngg_options *options)
 
    /* Emit the finale sequence */
    ngg_gs_finale(b, &state);
+
+   /* Take care of metadata and validation before calling other passes */
+   nir_progress(true, impl, nir_metadata_none);
    nir_validate_shader(shader, "after emitting NGG GS");
 
    /* Cleanup */
    nir_lower_vars_to_ssa(shader);
    nir_remove_dead_variables(shader, nir_var_function_temp, NULL);
-   nir_metadata_preserve(impl, nir_metadata_none);
+   return nir_progress(true, impl, nir_metadata_none);
 }

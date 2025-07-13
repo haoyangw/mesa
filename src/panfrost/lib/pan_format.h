@@ -41,6 +41,7 @@ typedef uint32_t mali_pixel_format;
 #define PAN_BIND_RENDER_TARGET (1 << 1)
 #define PAN_BIND_SAMPLER_VIEW  (1 << 3)
 #define PAN_BIND_VERTEX_BUFFER (1 << 4)
+#define PAN_BIND_STORAGE_IMAGE (1 << 15) /* == PIPE_BIND_SHADER_IMAGE */
 
 struct panfrost_format {
    uint32_t hw : 22;
@@ -67,6 +68,10 @@ extern const struct pan_blendable_format
    panfrost_blendable_formats_v9[PIPE_FORMAT_COUNT];
 extern const struct pan_blendable_format
    panfrost_blendable_formats_v10[PIPE_FORMAT_COUNT];
+extern const struct pan_blendable_format
+   panfrost_blendable_formats_v12[PIPE_FORMAT_COUNT];
+extern const struct pan_blendable_format
+   panfrost_blendable_formats_v13[PIPE_FORMAT_COUNT];
 
 static inline const struct pan_blendable_format *
 panfrost_blendable_format_table(unsigned arch)
@@ -79,6 +84,8 @@ panfrost_blendable_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   FMT_TABLE(12);
+   FMT_TABLE(13);
 #undef FMT_TABLE
    default:
       assert(!"Unsupported architecture");
@@ -92,6 +99,8 @@ extern const struct panfrost_format panfrost_pipe_format_v6[PIPE_FORMAT_COUNT];
 extern const struct panfrost_format panfrost_pipe_format_v7[PIPE_FORMAT_COUNT];
 extern const struct panfrost_format panfrost_pipe_format_v9[PIPE_FORMAT_COUNT];
 extern const struct panfrost_format panfrost_pipe_format_v10[PIPE_FORMAT_COUNT];
+extern const struct panfrost_format panfrost_pipe_format_v12[PIPE_FORMAT_COUNT];
+extern const struct panfrost_format panfrost_pipe_format_v13[PIPE_FORMAT_COUNT];
 
 static inline const struct panfrost_format *
 panfrost_format_table(unsigned arch)
@@ -104,6 +113,8 @@ panfrost_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   FMT_TABLE(12);
+   FMT_TABLE(13);
 #undef FMT_TABLE
    default:
       assert(!"Unsupported architecture");

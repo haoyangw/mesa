@@ -36,6 +36,7 @@
 #include "etnaviv_rs.h"
 #include "etnaviv_surface.h"
 #include "etnaviv_translate.h"
+#include "etnaviv_yuv.h"
 
 #include "pipe/p_defines.h"
 #include "pipe/p_state.h"
@@ -104,11 +105,37 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
 {
    struct etna_context *ctx = etna_context(pctx);
    struct pipe_blit_info info = *blit_info;
+   struct etna_resource *src = etna_resource(info.src.resource);
+   struct etna_resource *dst = etna_resource(info.dst.resource);
 
    if (info.render_condition_enable && !etna_render_condition_check(pctx))
       return;
 
+   /* blit from most recent shadow of the source */
+   if (src->render &&
+       etna_resource_level_newer(&etna_resource(src->render)->levels[info.src.level],
+                                 &etna_resource(info.src.resource)->levels[info.src.level]))
+      info.src.resource = src->render;
+   if (src->texture &&
+      etna_resource_level_newer(&etna_resource(src->texture)->levels[info.src.level],
+                                &etna_resource(info.src.resource)->levels[info.src.level]))
+      info.src.resource = src->texture;
+
+   /* blit to the most recent shadow of the destination */
+   if (dst->render &&
+       etna_resource_level_newer(&etna_resource(dst->render)->levels[info.dst.level],
+                                 &etna_resource(info.dst.resource)->levels[info.dst.level]))
+      info.dst.resource = dst->render;
+   if (dst->texture &&
+       etna_resource_level_newer(&etna_resource(dst->texture)->levels[info.dst.level],
+                                 &etna_resource(info.dst.resource)->levels[info.dst.level]))
+      info.dst.resource = dst->texture;
+
    if (ctx->blit(pctx, &info))
+      goto success;
+
+   if (etna_format_needs_yuv_tiler(blit_info->src.format) &&
+       etna_try_yuv_blit(pctx, blit_info))
       goto success;
 
    if (util_try_blit_via_copy_region(pctx, &info, false))
@@ -189,8 +216,15 @@ etna_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
    struct etna_resource *rsc = etna_resource(prsc);
 
    if (rsc->render) {
-      if (etna_resource_older(rsc, etna_resource(rsc->render)))
-         etna_copy_resource(pctx, prsc, rsc->render, 0, 0);
+      if (etna_resource_older(rsc, etna_resource(rsc->render))) {
+         if (rsc->damage) {
+            for (unsigned i = 0; i < rsc->num_damage; i++) {
+               etna_copy_resource_box(pctx, prsc, rsc->render, 0, 0, &rsc->damage[i]);
+            }
+         } else {
+            etna_copy_resource(pctx, prsc, rsc->render, 0, 0);
+         }
+      }
    } else if (!etna_resource_ext_ts(rsc) && etna_resource_needs_flush(rsc)) {
       etna_copy_resource(pctx, prsc, prsc, 0, 0);
    }
@@ -200,10 +234,11 @@ void
 etna_copy_resource(struct pipe_context *pctx, struct pipe_resource *dst,
                    struct pipe_resource *src, int first_level, int last_level)
 {
+   struct etna_context *ctx = etna_context(pctx);
    struct etna_resource *src_priv = etna_resource(src);
    struct etna_resource *dst_priv = etna_resource(dst);
 
-   assert(src->format == dst->format);
+   assert(src->format == dst->format || util_format_is_yuv(src->format));
    assert(src->array_size == dst->array_size);
    assert(last_level <= dst->last_level && last_level <= src->last_level);
 
@@ -240,7 +275,7 @@ etna_copy_resource(struct pipe_context *pctx, struct pipe_resource *dst,
 
       for (int z = 0; z < depth; z++) {
          blit.src.box.z = blit.dst.box.z = z;
-         pctx->blit(pctx, &blit);
+         ctx->blit(pctx, &blit);
       }
 
       if (src == dst)
@@ -255,6 +290,7 @@ etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
                        struct pipe_resource *src, int dst_level, int src_level,
                        struct pipe_box *box)
 {
+   struct etna_context *ctx = etna_context(pctx);
    struct etna_resource *src_priv = etna_resource(src);
    struct etna_resource *dst_priv = etna_resource(dst);
 
@@ -278,7 +314,7 @@ etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
 
    for (int z = 0; z < box->depth; z++) {
       blit.src.box.z = blit.dst.box.z = box->z + z;
-      pctx->blit(pctx, &blit);
+      ctx->blit(pctx, &blit);
    }
 
    if (src == dst)

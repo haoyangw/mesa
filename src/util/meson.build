@@ -211,6 +211,13 @@ format_srgb = custom_target(
   capture : true,
 )
 
+files_mesa_util += custom_target(
+  input : ['process_shader_stats.py', 'shader_stats.rnc', 'shader_stats.xml'],
+  output : 'shader_stats.h',
+  command : [prog_python, '@INPUT@'],
+  capture : true,
+)
+
 # subdir format provide files_mesa_format
 subdir('format')
 files_mesa_util += files_mesa_format
@@ -230,6 +237,11 @@ deps_for_libmesa_util = [
   idep_mesautilc11,
   idep_mesautilformat,
 ]
+
+if dep_libdrm.found()
+  files_mesa_util += files('u_sync_provider.c', 'u_sync_provider.h')
+  deps_for_libmesa_util += dep_libdrm
+endif
 
 if with_platform_android
   deps_for_libmesa_util += dep_android
@@ -271,6 +283,7 @@ libmesa_util_sse41 = static_library(
   c_args : [c_msvc_compat_args, sse41_args],
   include_directories : [inc_util],
   gnu_symbol_visibility : 'hidden',
+  build_by_default : false,
 )
 
 _libmesa_util = static_library(

@@ -59,7 +59,7 @@ g_egldispatchstubs_c = custom_target(
   command : [
     prog_python, '@INPUT0@', 'source', '@INPUT1@', '@INPUT2@',
   ],
-  depend_files : [ files('generate/eglFunctionList.py'), genCommon_py, ],
+  depend_files : [ 'generate/eglFunctionList.py', glapi_xml_py_deps],
   capture : true,
 )
 
@@ -73,7 +73,7 @@ g_egldispatchstubs_h = custom_target(
   command : [
     prog_python, '@INPUT0@', 'header', '@INPUT1@', '@INPUT2@',
   ],
-  depend_files : [ files('generate/eglFunctionList.py'), genCommon_py, ],
+  depend_files : [ 'generate/eglFunctionList.py', glapi_xml_py_deps],
   capture : true,
 )
 
@@ -83,6 +83,7 @@ if with_dri
     'drivers/dri2/egl_dri2.h',
   )
   files_egl += sha1_h
+  files_egl += main_dispatch_h
   deps_for_egl += idep_xmlconfig
   link_for_egl += libloader
   incs_for_egl += inc_loader
@@ -107,9 +108,8 @@ if with_dri
   endif
   if with_gbm and not with_platform_android
     files_egl += files('drivers/dri2/platform_drm.c')
-    link_for_egl += libgbm
-    incs_for_egl += [inc_gbm, include_directories('../gbm/main')]
-    deps_for_egl += dep_libdrm
+    incs_for_egl += [include_directories('../gbm/backends/dri')]
+    deps_for_egl += [dep_libdrm, dep_gbm]
   endif
   if with_platform_wayland
     deps_for_egl += [dep_wayland_client, dep_wayland_server, dep_wayland_egl_headers]
@@ -140,6 +140,7 @@ elif with_platform_windows
     '-DEGLAPI=', '-DPUBLIC='
   ]
   files_egl += files('drivers/wgl/egl_wgl.c')
+  files_egl += main_dispatch_h
   incs_for_egl += [inc_wgl, inc_gallium, inc_gallium_aux, inc_mesa, inc_mapi]
   link_for_egl += libgallium_wgl
 

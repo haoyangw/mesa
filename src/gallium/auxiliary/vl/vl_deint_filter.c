@@ -280,7 +280,7 @@ vl_deint_filter_init(struct vl_deint_filter *filter, struct pipe_context *pipe,
       pipe->screen,
       PIPE_VIDEO_PROFILE_UNKNOWN,
       PIPE_VIDEO_ENTRYPOINT_PROCESSING,
-      PIPE_VIDEO_CAP_PREFERED_FORMAT
+      PIPE_VIDEO_CAP_PREFERRED_FORMAT
    );
    templ.width = video_width;
    templ.height = video_height;
@@ -532,7 +532,7 @@ vl_deint_filter_render(struct vl_deint_filter *filter,
       sampler_views[2] = cur_sv[k];
       sampler_views[3] = next_sv[k];
       filter->pipe->set_sampler_views(filter->pipe, PIPE_SHADER_FRAGMENT,
-                                      0, 4, 0, false, sampler_views);
+                                      0, 4, 0, sampler_views);
 
       /* blit current field */
       fb_state.cbufs[0] = blit_surf;

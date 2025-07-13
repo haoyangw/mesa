@@ -151,6 +151,7 @@ impl SPIRVBin {
             features: features,
             use_llvm_spirv_target: false,
             allowed_spirv_extensions: spirv_extensions.as_ptr(),
+            c_compatible: false,
             address_bits: address_bits,
         };
         let mut msgs: Vec<String> = Vec::new();
@@ -296,6 +297,7 @@ impl SPIRVBin {
             LiteralSampler: true,
             SampledBuffer: true,
             Sampled1D: true,
+            UniformDecoration: true,
             Vector16: true,
             ..Default::default()
         }
@@ -375,7 +377,7 @@ impl SPIRVBin {
 
     pub fn get_lib_clc(screen: &PipeScreen) -> Option<NirShader> {
         let nir_options = screen.nir_shader_compiler_options(pipe_shader_type::PIPE_SHADER_COMPUTE);
-        let address_bits = screen.compute_param(pipe_compute_cap::PIPE_COMPUTE_CAP_ADDRESS_BITS);
+        let address_bits = screen.compute_caps().address_bits;
         let spirv_caps = Self::get_spirv_capabilities();
         let spirv_options =
             Self::get_spirv_options(false, ptr::null(), address_bits, &spirv_caps, None);

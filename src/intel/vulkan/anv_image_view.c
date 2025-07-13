@@ -58,11 +58,11 @@ anv_image_fill_surface_state(struct anv_device *device,
    struct isl_view view = *view_in;
    view.usage |= view_usage;
 
-   /* Propagate the protection flag of the image to the view. */
-   view_usage |= surface->isl.usage & ISL_SURF_USAGE_PROTECTED_BIT;
-
    if (view_usage == ISL_SURF_USAGE_RENDER_TARGET_BIT)
       view.swizzle = anv_swizzle_for_render(view.swizzle);
+
+   /* Propagate the protection flag of the image to the view. */
+   view_usage |= surface->isl.usage & ISL_SURF_USAGE_PROTECTED_BIT;
 
    /* If this is a HiZ buffer we can sample from with a programmable clear
     * value (SKL+), define the clear value to the optimal constant.
@@ -111,9 +111,6 @@ anv_image_fill_surface_state(struct anv_device *device,
       anv_image_get_clear_color_addr(device, image, view.format, aspect,
                                      view_usage & ISL_SURF_USAGE_TEXTURE_BIT);
    state_inout->clear_address = clear_address;
-
-   if (image->vk.create_flags & VK_IMAGE_CREATE_PROTECTED_BIT)
-      view_usage |= ISL_SURF_USAGE_PROTECTED_BIT;
 
    isl_surf_fill_state(&device->isl_dev, surface_state_map,
                        .surf = isl_surf,
@@ -265,10 +262,10 @@ anv_image_view_init(struct anv_device *device,
          anv_aspect_to_plane(iview->vk.aspects, 1UL << iaspect_bit);
 
       VkFormat view_format = iview->vk.view_format;
-      if (anv_is_format_emulated(device->physical, view_format)) {
+      if (anv_is_compressed_format_emulated(device->physical, view_format)) {
          assert(image->emu_plane_format != VK_FORMAT_UNDEFINED);
          view_format =
-            anv_get_emulation_format(device->physical, view_format);
+            anv_get_compressed_format_emulation(device->physical, view_format);
       }
       const struct anv_format_plane format = anv_get_format_plane(
             device->physical, view_format, vplane, image->vk.tiling);

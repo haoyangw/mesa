@@ -237,7 +237,7 @@ build_lrz(struct fd6_emit *emit) assert_dt
             .enable = lrz.enable,
             .lrz_write = lrz.write,
             .greater = lrz.direction == FD_LRZ_GREATER,
-            .z_test_enable = lrz.test,
+            .z_write_enable = lrz.test,
             .z_bounds_enable = lrz.z_bounds_enable,
          )
       );
@@ -254,7 +254,7 @@ build_lrz(struct fd6_emit *emit) assert_dt
             .lrz_write = lrz.write,
             .greater = lrz.direction == FD_LRZ_GREATER,
             .fc_enable = false,
-            .z_test_enable = lrz.test,
+            .z_write_enable = lrz.test,
             .z_bounds_enable = lrz.z_bounds_enable,
             .disable_on_wrong_dir = false,
          )
@@ -977,8 +977,12 @@ fd6_emit_static_regs(struct fd_context *ctx, struct fd_ringbuffer *ring)
    /* NOTE blob seems to (mostly?) use 0xb2 for SP_TP_MODE_CNTL
     * but this seems to kill texture gather offsets.
     */
-   WRITE(REG_A6XX_SP_TP_MODE_CNTL, 0xa0 |
-         A6XX_SP_TP_MODE_CNTL_ISAMMODE(ISAMMODE_GL));
+   OUT_REG(ring,
+      A6XX_SP_TP_MODE_CNTL(
+         .isammode = ISAMMODE_GL,
+         .texcoordroundmode = COORD_TRUNCATE,
+         .nearestmipsnap = CLAMP_ROUND_TRUNCATE,
+         .destdatatypeoverride = true));
 
    OUT_REG(ring, HLSQ_CONTROL_5_REG(
          CHIP,

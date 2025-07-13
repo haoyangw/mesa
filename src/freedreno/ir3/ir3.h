@@ -28,7 +28,6 @@ struct ir3_instruction;
 struct ir3_block;
 
 struct ir3_info {
-   void *data; /* used internally in ir3 assembler */
    /* Size in bytes of the shader binary, including NIR constants and
     * padding
     */
@@ -149,8 +148,13 @@ typedef enum ir3_register_flags {
    IR3_REG_EARLY_CLOBBER = BIT(17),
 
    /* If this is the last usage of a specific value in the register, the
-    * register cannot be read without being written to first after this. 
-    * Note: This effectively has the same semantics as IR3_REG_KILL.
+    * register cannot be read without being written to first after this.
+    * This maps to the "(last)" attribute on source GPRs in shader
+    * instructions which was introduced in A7XX.
+    *
+    * Note: This effectively has the same semantics as IR3_REG_KILL but
+    * is tracked after register assignment. Additionally, this doesn't
+    * cover any const or shared registers.
     */
    IR3_REG_LAST_USE = BIT(18),
 
@@ -898,6 +902,9 @@ void ir3_reg_set_last_array(struct ir3_instruction *instr,
 void ir3_instr_set_address(struct ir3_instruction *instr,
                            struct ir3_instruction *addr);
 
+struct ir3_instruction *ir3_create_addr1(struct ir3_builder *build,
+                                         unsigned const_val);
+
 static inline bool
 ir3_instr_check_mark(struct ir3_instruction *instr)
 {
@@ -1007,6 +1014,7 @@ is_terminator(struct ir3_instruction *instr)
    case OPC_BRAA:
    case OPC_BRAO:
    case OPC_SHPS:
+   case OPC_SHPE:
    case OPC_GETONE:
    case OPC_GETLAST:
    case OPC_PREDT:
@@ -1510,6 +1518,18 @@ writes_addr1(struct ir3_instruction *instr)
       return dst->num == regid(REG_A0, 1);
    }
    return false;
+}
+
+static inline bool
+reads_addr0(struct ir3_instruction *instr)
+{
+   return instr->address && instr->address->num == regid(REG_A0, 0);
+}
+
+static inline bool
+reads_addr1(struct ir3_instruction *instr)
+{
+   return instr->address && instr->address->num == regid(REG_A0, 1);
 }
 
 static inline bool
@@ -2296,13 +2316,17 @@ bool ir3_cf(struct ir3 *ir);
 bool ir3_shared_fold(struct ir3 *ir);
 
 /* copy-propagate: */
-bool ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so);
+bool ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so,
+            bool lower_imm_to_const);
 
 /* common subexpression elimination: */
 bool ir3_cse(struct ir3 *ir);
 
 /* Make arrays SSA */
 bool ir3_array_to_ssa(struct ir3 *ir);
+
+/* Initialize immediates lowered to consts by ir3_cp in the preamble. */
+bool ir3_imm_const_to_preamble(struct ir3 *ir, struct ir3_shader_variant *so);
 
 /* scheduling: */
 bool ir3_sched_add_deps(struct ir3 *ir);
@@ -2365,6 +2389,21 @@ ir3_instr_move_after_phis(struct ir3_instruction *instr,
       ir3_instr_move_after(instr, last_phi);
    else
       ir3_instr_move_before_block(instr, block);
+}
+
+static inline struct ir3_block *
+ir3_cursor_current_block(struct ir3_cursor cursor)
+{
+   switch (cursor.option) {
+   case IR3_CURSOR_BEFORE_BLOCK:
+   case IR3_CURSOR_AFTER_BLOCK:
+      return cursor.block;
+   case IR3_CURSOR_BEFORE_INSTR:
+   case IR3_CURSOR_AFTER_INSTR:
+      return cursor.instr->block;
+   }
+
+   unreachable("illegal cursor option");
 }
 
 static inline struct ir3_cursor
@@ -2645,6 +2684,11 @@ ir3_BALLOT_MACRO(struct ir3_builder *build, struct ir3_instruction *src,
 
    return instr;
 }
+
+struct ir3_instruction *ir3_store_const(struct ir3_shader_variant *so,
+                                        struct ir3_builder *build,
+                                        struct ir3_instruction *src,
+                                        unsigned dst);
 
 /* clang-format off */
 #define __INSTR0(flag, name, opc)                                              \

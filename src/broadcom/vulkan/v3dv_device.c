@@ -1045,7 +1045,7 @@ get_device_properties(const struct v3dv_physical_device *device,
       .subgroupSize = V3D_CHANNELS,
       .subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT |
                                  VK_SHADER_STAGE_FRAGMENT_BIT,
-      .subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT,
+      .subgroupSupportedOperations = subgroup_ops,
       .subgroupQuadOperationsInAllStages = false,
       .pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES,
       .maxMultiviewViewCount = MAX_MULTIVIEW_VIEW_COUNT,
@@ -1229,8 +1229,6 @@ get_device_properties(const struct v3dv_physical_device *device,
       .maxSubgroupSize = V3D_CHANNELS,
       .maxComputeWorkgroupSubgroups = 16, /* 256 / 16 */
       .requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT,
-
-      .subgroupSupportedOperations = subgroup_ops,
 
       /* VK_KHR_maintenance5 */
       .earlyFragmentMultisampleCoverageAfterSampleCounting = true,
@@ -1481,8 +1479,6 @@ static void
 try_display_device(struct v3dv_instance *instance, const char *path,
                    int32_t *fd)
 {
-   bool khr_display = instance->vk.enabled_extensions.KHR_display ||
-      instance->vk.enabled_extensions.EXT_acquire_drm_display;
    *fd = open(path, O_RDWR | O_CLOEXEC);
    if (*fd < 0) {
       mesa_loge("Opening %s failed: %s\n", path, strerror(errno));
@@ -1493,13 +1489,10 @@ try_display_device(struct v3dv_instance *instance, const char *path,
    if (!drmIsKMS(*fd))
       goto fail;
 
-   /* If using VK_KHR_display, we require the fd to have a connected output.
-    * We need to use this strategy because Raspberry Pi 5 can load different
-    * drivers for different types of connectors and the one with a connected
-    * output may not be vc4, which unlike Raspberry Pi 4, doesn't drive the
-    * DSI output for example.
+   /* Note that VK_EXT_acquire_drm_display requires KHR_display so there is
+    * no need to check for it explicitly here.
     */
-   if (!khr_display) {
+   if (!instance->vk.enabled_extensions.KHR_display) {
       if (instance->vk.enabled_extensions.KHR_xcb_surface ||
           instance->vk.enabled_extensions.KHR_xlib_surface ||
           instance->vk.enabled_extensions.KHR_wayland_surface)
@@ -1508,6 +1501,19 @@ try_display_device(struct v3dv_instance *instance, const char *path,
          goto fail;
    }
 
+   /* When using VK_EXT_acquire_drm_display, the user is expected to get
+    * the master fd and provide it to the driver through vkAcquireDrmDisplayEXT.
+    * Therefore, the fd we open here won't be master.
+    */
+   if (instance->vk.enabled_extensions.EXT_acquire_drm_display)
+      return;
+
+   /* If using VK_KHR_display, we require the fd to have a connected output.
+    * We need to use this strategy because Raspberry Pi 5 can load different
+    * drivers for different types of connectors and the one with a connected
+    * output may not be vc4, which unlike Raspberry Pi 4, doesn't drive the
+    * DSI output for example.
+    */
    drmModeResPtr mode_res = drmModeGetResources(*fd);
    if (!mode_res) {
       mesa_loge("Failed to get DRM mode resources: %s\n", strerror(errno));
@@ -2552,7 +2558,7 @@ v3dv_BindImageMemory2(VkDevice _device,
       }
 
       const VkBindImageMemorySwapchainInfoKHR *swapchain_info =
-         vk_find_struct_const(pBindInfos->pNext,
+         vk_find_struct_const(pBindInfos[i].pNext,
                               BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
       if (swapchain_info && swapchain_info->swapchain) {
 #if !DETECT_OS_ANDROID

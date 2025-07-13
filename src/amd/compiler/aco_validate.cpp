@@ -480,18 +480,21 @@ validate_ir(Program* program)
                   const_bus_limit = 2;
 
                uint32_t scalar_mask;
-               if (instr->isVOP3() || instr->isVOP3P() || instr->isVINTERP_INREG())
+               if (instr->isVOP3() || instr->isVOP3P())
                   scalar_mask = 0x7;
                else if (instr->isSDWA())
                   scalar_mask = program->gfx_level >= GFX9 ? 0x7 : 0x4;
-               else if (instr->isDPP())
-                  scalar_mask = 0x4;
                else if (instr->opcode == aco_opcode::v_movrels_b32 ||
                         instr->opcode == aco_opcode::v_movrelsd_b32 ||
                         instr->opcode == aco_opcode::v_movrelsd_2_b32)
                   scalar_mask = 0x2;
+               else if (instr->isVINTERP_INREG())
+                  scalar_mask = 0x0;
                else
                   scalar_mask = 0x5;
+
+               if (instr->isDPP())
+                  scalar_mask &= 0x4; /* TODO 0x6 for GFX11.5+ */
 
                if (instr->isVOPC() || instr->opcode == aco_opcode::v_readfirstlane_b32 ||
                    instr->opcode == aco_opcode::v_readlane_b32 ||
@@ -1391,7 +1394,7 @@ validate_ra(Program* program)
    bool err = false;
    aco::live_var_analysis(program);
    std::vector<std::vector<Temp>> phi_sgpr_ops(program->blocks.size());
-   uint16_t sgpr_limit = get_addr_sgpr_from_waves(program, program->num_waves);
+   uint16_t sgpr_limit = get_addr_regs_from_waves(program, program->num_waves).sgpr;
 
    std::vector<Assignment> assignments(program->peekAllocationId());
    for (Block& block : program->blocks) {
@@ -1467,6 +1470,13 @@ validate_ra(Program* program)
             assignments[def.tempId()].defloc = loc;
             assignments[def.tempId()].reg = def.physReg();
             assignments[def.tempId()].valid = true;
+         }
+
+         int op_fixed_to_def = get_op_fixed_to_def(instr.get());
+         if (op_fixed_to_def != -1 &&
+             instr->definitions[0].physReg() != instr->operands[op_fixed_to_def].physReg()) {
+            err |= ra_fail(program, loc, Location(),
+                           "Operand %d must have the same register as definition", op_fixed_to_def);
          }
       }
    }

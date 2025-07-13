@@ -22,7 +22,6 @@
 #include "util/u_tests.h"
 #include "util/u_upload_mgr.h"
 #include "util/xmlconfig.h"
-#include "vl/vl_decoder.h"
 #include "si_utrace.h"
 
 #include "aco_interface.h"
@@ -194,7 +193,8 @@ static void si_destroy_context(struct pipe_context *context)
 {
    struct si_context *sctx = (struct si_context *)context;
 
-   context->set_debug_callback(context, NULL);
+   if (context->set_debug_callback)
+      context->set_debug_callback(context, NULL);
 
    util_unreference_framebuffer_state(&sctx->framebuffer.state);
    si_release_all_descriptors(sctx);
@@ -251,10 +251,6 @@ static void si_destroy_context(struct pipe_context *context)
       sctx->b.delete_vs_state(&sctx->b, sctx->vs_blit_pos);
    if (sctx->vs_blit_pos_layered)
       sctx->b.delete_vs_state(&sctx->b, sctx->vs_blit_pos_layered);
-   if (sctx->vs_blit_color)
-      sctx->b.delete_vs_state(&sctx->b, sctx->vs_blit_color);
-   if (sctx->vs_blit_color_layered)
-      sctx->b.delete_vs_state(&sctx->b, sctx->vs_blit_color_layered);
    if (sctx->vs_blit_texcoord)
       sctx->b.delete_vs_state(&sctx->b, sctx->vs_blit_texcoord);
    if (sctx->cs_clear_buffer_rmw)
@@ -522,6 +518,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
                         ((sscreen->info.family == CHIP_RAVEN ||
                           sscreen->info.family == CHIP_RAVEN2) &&
                          !sscreen->info.has_dedicated_vram) ||
+                        !sscreen->info.ip[AMD_IP_COMPUTE].num_queues ||
                         !(flags & PIPE_CONTEXT_COMPUTE_ONLY);
 
    if (flags & PIPE_CONTEXT_DEBUG)
@@ -747,9 +744,6 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
       sctx->b.create_video_buffer = si_video_buffer_create;
       if (screen->resource_create_with_modifiers)
          sctx->b.create_video_buffer_with_modifiers = si_video_buffer_create_with_modifiers;
-   } else {
-      sctx->b.create_video_codec = vl_create_decoder;
-      sctx->b.create_video_buffer = vl_video_buffer_create;
    }
 
    /* GFX7 cannot unbind a constant buffer (S_BUFFER_LOAD doesn't skip loads
@@ -835,10 +829,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
    }
 
    if (sctx->gfx_level == GFX7) {
-      /* Clear the NULL constant buffer, because loads should return zeros.
-       * Note that this forces CP DMA to be used, because clover deadlocks
-       * for some reason when the compute codepath is used.
-       */
+      /* Clear the NULL constant buffer, because loads should return zeros. */
       uint32_t clear_value = 0;
       si_cp_dma_clear_buffer(sctx, &sctx->gfx_cs, sctx->null_const_buf.buffer, 0,
                              sctx->null_const_buf.buffer->width0, clear_value);
@@ -1075,6 +1066,7 @@ void si_destroy_screen(struct pipe_screen *pscreen)
    util_vertex_state_cache_deinit(&sscreen->vertex_state_cache);
 
    sscreen->ws->destroy(sscreen->ws);
+   FREE(sscreen->use_aco_shader_blakes);
    FREE(sscreen->nir_options);
    FREE(sscreen);
 }
@@ -1159,6 +1151,79 @@ static bool si_is_parallel_shader_compilation_finished(struct pipe_screen *scree
    return util_queue_fence_is_signalled(&sel->ready);
 }
 
+static void si_setup_force_shader_use_aco(struct si_screen *sscreen, bool support_aco)
+{
+   /* Usage:
+    *   1. shader type: vs|tcs|tes|gs|ps|cs, specify a class of shaders to use aco
+    *   2. shader blake: specify a single shader blake directly to use aco
+    *   3. filename: specify a file which contains shader blakes in lines
+    */
+
+   sscreen->use_aco_shader_type = MESA_SHADER_NONE;
+
+   if (sscreen->use_aco || !support_aco)
+      return;
+
+   const char *option = debug_get_option("AMD_FORCE_SHADER_USE_ACO", NULL);
+   if (!option)
+      return;
+
+   if (!strcmp("vs", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_VERTEX;
+      return;
+   } else if (!strcmp("tcs", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_TESS_CTRL;
+      return;
+   } else if (!strcmp("tes", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_TESS_EVAL;
+      return;
+   } else if (!strcmp("gs", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_GEOMETRY;
+      return;
+   } else if (!strcmp("ps", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_FRAGMENT;
+      return;
+   } else if (!strcmp("cs", option)) {
+      sscreen->use_aco_shader_type = MESA_SHADER_COMPUTE;
+      return;
+   }
+
+   blake3_hash blake;
+   if (_mesa_blake3_from_printed_string(blake, option)) {
+      sscreen->use_aco_shader_blakes = MALLOC(sizeof(blake));
+      memcpy(sscreen->use_aco_shader_blakes[0], blake, sizeof(blake));
+      sscreen->num_use_aco_shader_blakes = 1;
+      return;
+   }
+
+   FILE *f = fopen(option, "r");
+   if (!f) {
+      fprintf(stderr, "radeonsi: invalid AMD_FORCE_SHADER_USE_ACO value\n");
+      return;
+   }
+
+   unsigned max_size = 16 * sizeof(blake3_hash);
+   sscreen->use_aco_shader_blakes = MALLOC(max_size);
+
+   char line[1024];
+   while (fgets(line, sizeof(line), f)) {
+      if (sscreen->num_use_aco_shader_blakes * sizeof(blake3_hash) >= max_size) {
+         sscreen->use_aco_shader_blakes = REALLOC(
+            sscreen->use_aco_shader_blakes, max_size, max_size * 2);
+         max_size *= 2;
+      }
+
+      if (line[BLAKE3_PRINTED_LEN] == '\n')
+         line[BLAKE3_PRINTED_LEN] = 0;
+
+      if (_mesa_blake3_from_printed_string(
+             sscreen->use_aco_shader_blakes[sscreen->num_use_aco_shader_blakes], line))
+         sscreen->num_use_aco_shader_blakes++;
+   }
+
+   fclose(f);
+}
+
 static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                                                        const struct pipe_screen_config *config)
 {
@@ -1226,16 +1291,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       return NULL;
    }
 
-   if (!sscreen->use_aco && support_aco) {
-      const char *shader_blake = debug_get_option("AMD_FORCE_SHADER_USE_ACO", NULL);
-      if (shader_blake) {
-         sscreen->force_shader_use_aco =
-            _mesa_blake3_from_printed_string(sscreen->use_aco_shader_blake, shader_blake);
-
-         if (!sscreen->force_shader_use_aco)
-            fprintf(stderr, "radeonsi: invalid AMD_SHADER_FORCE_ACO value\n");
-      }
-   }
+   si_setup_force_shader_use_aco(sscreen, support_aco);
 
    if ((sscreen->debug_flags & DBG(TMZ)) &&
        !sscreen->info.has_tmz_support) {
@@ -1284,6 +1340,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       (sscreen->info.gfx_level == GFX6 && sscreen->info.pfp_fw_version >= 79 &&
        sscreen->info.me_fw_version >= 142);
 
+   si_init_shader_caps(sscreen);
+   si_init_compute_caps(sscreen);
    si_init_screen_caps(sscreen);
 
    if (sscreen->debug_flags & DBG(INFO))

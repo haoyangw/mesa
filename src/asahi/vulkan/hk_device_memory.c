@@ -52,7 +52,7 @@ hk_memory_type_flags(const VkMemoryType *type,
 static void
 hk_add_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
 {
-   uint32_t id = bo->vbo_res_id;
+   uint32_t id = bo->uapi_handle;
 
    unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
                                                struct asahi_ccmd_submit_res);
@@ -89,7 +89,7 @@ hk_add_ext_bo(struct hk_device *dev, struct agx_bo *bo)
 static void
 hk_remove_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
 {
-   uint32_t id = bo->vbo_res_id;
+   uint32_t id = bo->uapi_handle;
    unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
                                                struct asahi_ccmd_submit_res);
 
@@ -218,6 +218,13 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
          goto fail_alloc;
       }
    }
+
+   /* Shadow map in case this is used for a sparse resident buffer */
+   int ret = agx_bo_bind(&dev->dev, mem->bo,
+                         agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
+                         mem->bo->size, 0, DRM_ASAHI_BIND_READ);
+   if (ret)
+      return VK_ERROR_UNKNOWN;
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_add_ext_bo(dev, mem->bo);
@@ -349,8 +356,10 @@ hk_UnmapMemory2KHR(VkDevice device,
       }
 #endif
    } else {
-      /* TODO */
-      //// agx_bo_unmap(mem->bo, mem->map);
+      if (mem->bo->_map) {
+         munmap(mem->bo->_map, mem->bo->size);
+         mem->bo->_map = NULL;
+      }
    }
 
    mem->map = NULL;

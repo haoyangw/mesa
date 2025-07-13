@@ -63,21 +63,6 @@ static const uint32_t ploc_spv[] = {
 #include "bvh/ploc_internal.spv.h"
 };
 
-VkDeviceAddress
-vk_acceleration_structure_get_va(struct vk_acceleration_structure *accel_struct)
-{
-   VkBufferDeviceAddressInfo info = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = accel_struct->buffer,
-   };
-
-   VkDeviceAddress base_addr = accel_struct->base.device->dispatch_table.GetBufferDeviceAddress(
-      vk_device_to_handle(accel_struct->base.device), &info);
-
-   return base_addr + accel_struct->offset;
-}
-
-
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_CreateAccelerationStructureKHR(VkDevice _device,
                                          const VkAccelerationStructureCreateInfoKHR *pCreateInfo,
@@ -85,6 +70,7 @@ vk_common_CreateAccelerationStructureKHR(VkDevice _device,
                                          VkAccelerationStructureKHR *pAccelerationStructure)
 {
    VK_FROM_HANDLE(vk_device, device, _device);
+   VK_FROM_HANDLE(vk_buffer, buffer, pCreateInfo->buffer);
 
    struct vk_acceleration_structure *accel_struct = vk_object_alloc(
       device, pAllocator, sizeof(struct vk_acceleration_structure),
@@ -93,7 +79,7 @@ vk_common_CreateAccelerationStructureKHR(VkDevice _device,
    if (!accel_struct)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   accel_struct->buffer = pCreateInfo->buffer;
+   accel_struct->buffer = buffer;
    accel_struct->offset = pCreateInfo->offset;
    accel_struct->size = pCreateInfo->size;
 
@@ -303,24 +289,22 @@ struct bvh_batch_state {
 
 static VkResult
 get_pipeline_spv(struct vk_device *device, struct vk_meta_device *meta,
-                 const char *name, const uint32_t *spv, uint32_t spv_size,
+                 enum vk_meta_object_key_type key, const uint32_t *spv, uint32_t spv_size,
                  unsigned push_constant_size,
                  const struct vk_acceleration_structure_build_args *args,
                  VkPipeline *pipeline, VkPipelineLayout *layout)
 {
-   size_t key_size = strlen(name);
-
    VkResult result = vk_meta_get_pipeline_layout(
          device, meta, NULL,
          &(VkPushConstantRange){
             VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant_size
          },
-         name, key_size, layout);
+         &key, sizeof(key), layout);
 
    if (result != VK_SUCCESS)
       return result;
 
-   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(meta, name, key_size);
+   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(meta, &key, sizeof(key));
    if (pipeline_from_cache != VK_NULL_HANDLE) {
       *pipeline = pipeline_from_cache;
       return VK_SUCCESS;
@@ -382,7 +366,7 @@ get_pipeline_spv(struct vk_device *device, struct vk_meta_device *meta,
    };
 
    return vk_meta_create_compute_pipeline(device, meta, &pipeline_info,
-                                          name, key_size, pipeline);
+                                          &key, sizeof(key), pipeline);
 }
 
 static uint32_t
@@ -508,12 +492,27 @@ build_leaves(VkCommandBuffer commandBuffer,
     */
     VkResult result;
    if (updateable) {
-      result = get_pipeline_spv(device, meta, "leaves_always_active",
-                                leaf_always_active_spv,
-                                sizeof(leaf_always_active_spv),
-                                sizeof(struct leaf_args), args, &pipeline, &layout);
+      const uint32_t *spirv = leaf_always_active_spv;
+      size_t spirv_size = sizeof(leaf_always_active_spv);
+
+      if (device->as_build_ops->leaf_always_active_spirv_override) {
+         spirv = device->as_build_ops->leaf_always_active_spirv_override;
+         spirv_size = device->as_build_ops->leaf_always_active_spirv_override_size;
+      }
+
+      result = get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_LEAF_ALWAYS_ACTIVE, spirv,
+                                spirv_size, sizeof(struct leaf_args), args,
+                                &pipeline, &layout);
    } else {
-      result = get_pipeline_spv(device, meta, "leaves", leaf_spv, sizeof(leaf_spv),
+      const uint32_t *spirv = leaf_spv;
+      size_t spirv_size = sizeof(leaf_spv);
+
+      if (device->as_build_ops->leaf_spirv_override) {
+         spirv = device->as_build_ops->leaf_spirv_override;
+         spirv_size = device->as_build_ops->leaf_spirv_override_size;
+      }
+
+      result = get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_LEAF, spirv, spirv_size,
                                 sizeof(struct leaf_args), args, &pipeline, &layout);
    }
 
@@ -579,7 +578,7 @@ morton_generate(VkCommandBuffer commandBuffer, struct vk_device *device,
    VkPipelineLayout layout;
 
    VkResult result =
-      get_pipeline_spv(device, meta, "morton", morton_spv, sizeof(morton_spv),
+      get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_MORTON, morton_spv, sizeof(morton_spv),
                        sizeof(struct morton_args), args, &pipeline, &layout);
 
    if (result != VK_SUCCESS)
@@ -864,7 +863,7 @@ lbvh_build_internal(VkCommandBuffer commandBuffer,
    VkPipelineLayout layout;
 
    VkResult result =
-      get_pipeline_spv(device, meta, "lbvh_main", lbvh_main_spv,
+      get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_LBVH_MAIN, lbvh_main_spv,
                        sizeof(lbvh_main_spv),
                        sizeof(struct lbvh_main_args), args, &pipeline, &layout);
 
@@ -905,7 +904,7 @@ lbvh_build_internal(VkCommandBuffer commandBuffer,
    vk_barrier_compute_w_to_compute_r(commandBuffer);
 
    result =
-      get_pipeline_spv(device, meta, "lbvh_generate_ir", lbvh_generate_ir_spv,
+      get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_LBVH_GENERATE_IR, lbvh_generate_ir_spv,
                        sizeof(lbvh_generate_ir_spv),
                        sizeof(struct lbvh_generate_ir_args), args, &pipeline, &layout);
 
@@ -948,7 +947,7 @@ ploc_build_internal(VkCommandBuffer commandBuffer,
    VkPipelineLayout layout;
 
    VkResult result =
-      get_pipeline_spv(device, meta, "ploc", ploc_spv,
+      get_pipeline_spv(device, meta, VK_META_OBJECT_KEY_PLOC, ploc_spv,
                        sizeof(ploc_spv),
                        sizeof(struct ploc_args), args, &pipeline, &layout);
 
@@ -1012,10 +1011,24 @@ vk_cmd_build_acceleration_structures(VkCommandBuffer commandBuffer,
    struct bvh_state *bvh_states = calloc(infoCount, sizeof(struct bvh_state));
 
    if (args->emit_markers) {
-      device->as_build_ops->begin_debug_marker(commandBuffer,
-                                               VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP,
-                                               "vkCmdBuildAccelerationStructuresKHR(%u)",
-                                               infoCount);
+      uint32_t num_of_blas = 0;
+      uint32_t num_of_tlas = 0;
+      for (uint32_t i = 0; i < infoCount; ++i) {
+         switch (pInfos[i].type) {
+         case VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR:
+            num_of_tlas++;
+            break;
+         case VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR:
+            num_of_blas++;
+            break;
+         default:
+            break;
+         }
+      }
+      ops->begin_debug_marker(commandBuffer,
+                              VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP,
+                              "vkCmdBuildAccelerationStructuresKHR() TLAS(%u) BLAS(%u)",
+                              num_of_tlas, num_of_blas);
    }
 
    for (uint32_t i = 0; i < infoCount; ++i) {
@@ -1155,11 +1168,19 @@ vk_cmd_build_acceleration_structures(VkCommandBuffer commandBuffer,
       vk_barrier_compute_w_to_indirect_compute_r(commandBuffer);
    }
 
-   if (args->emit_markers) {
+   /* Calculate number of leaves and internal nodes to encode */
+   uint32_t num_leaves = 0;
+   uint32_t num_internal_node = 0;
+   for ( uint32_t i = 0; i < infoCount; i++) {
+      num_leaves += bvh_states[i].leaf_node_count;
+      num_internal_node += bvh_states[i].internal_node_count;
+   }
+
+   if (args->emit_markers)
       device->as_build_ops->begin_debug_marker(commandBuffer,
                                                VK_ACCELERATION_STRUCTURE_BUILD_STEP_ENCODE,
-                                               "encode");
-   }
+                                               "encode_leaves=%u encode_ir_node=%u",
+                                               num_leaves, num_internal_node);
 
    for (unsigned pass = 0; pass < ARRAY_SIZE(ops->encode_as); pass++) {
       if (!ops->encode_as[pass] && !ops->update_as[pass])
@@ -1349,4 +1370,3 @@ vk_common_CopyAccelerationStructureToMemoryKHR(VkDevice _device,
    unreachable("Unimplemented");
    return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
 }
-

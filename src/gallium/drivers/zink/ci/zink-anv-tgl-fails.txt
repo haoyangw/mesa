@@ -19,6 +19,7 @@ spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvyu,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-transcode-nv12-as-r8-gr88,Fail
 
+
 glx@glx-swap-pixmap-bad,Fail
 
 # ../src/gallium/drivers/zink/zink_kopper.c:859: zink_kopper_update: Assertion `pres->bind & PIPE_BIND_DISPLAY_TARGET' failed.
@@ -544,8 +545,6 @@ spec@ext_framebuffer_multisample@interpolation 8 centroid-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 8 non-centroid-deriv-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 8 non-centroid-disabled,Fail
 
-spec@ext_packed_float@query-rgba-signed-components,Fail
-
 spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
 spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
 spec@ext_transform_feedback@tessellation quads wireframe,Fail
@@ -672,13 +671,5 @@ glx@glx_arb_sync_control@swapbuffersmsc-divisor-zero,Fail
 glx@glx_arb_sync_control@swapbuffersmsc-return swap_interval 0,Fail
 glx@glx_arb_sync_control@swapbuffersmsc-return swap_interval 1,Fail
 
-# since hetzner migration
-spec@ovr_multiview@fb_blit_first_view_full,Fail
-spec@ovr_multiview@fb_blit_first_view_full_base1,Fail
-spec@ovr_multiview@fb_read_errors,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_0_2,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_1_2,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_2_0,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_2_1,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_2_3,Fail
-spec@ovr_multiview@fb_shader_mismatch_draw_errors_3_2,Fail
+# Validation error VUID-StandaloneSpirv-None-10684
+KHR-GL46.buffer_storage.map_persistent_texture,Crash

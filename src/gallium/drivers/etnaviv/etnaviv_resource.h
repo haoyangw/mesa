@@ -193,6 +193,16 @@ enum etna_resource_status {
    ETNA_PENDING_READ = 0x02,
 };
 
+struct etna_buffer_resource {
+   struct pipe_resource base;
+
+   /* buffer range that has been initialized */
+   struct util_range valid_buffer_range;
+
+   /* backing storage */
+   struct etna_bo *bo;
+};
+
 struct etna_resource {
    struct pipe_resource base;
    struct renderonly_scanout *scanout;
@@ -209,9 +219,6 @@ struct etna_resource {
 
    struct etna_resource_level levels[ETNA_NUM_LOD];
 
-   /* buffer range that has been initialized */
-   struct util_range valid_buffer_range;
-
    /* for when TE doesn't support the base layout */
    struct pipe_resource *texture;
    /* for when PE doesn't support the base layout */
@@ -220,6 +227,9 @@ struct etna_resource {
    bool explicit_flush;
    /* resource is shared outside of the screen */
    bool shared;
+
+   struct pipe_box *damage;
+   unsigned num_damage;
 };
 
 /* returns TRUE if a is newer than b */
@@ -281,7 +291,15 @@ etna_resource_ext_ts(const struct etna_resource *res)
 static inline struct etna_resource *
 etna_resource(struct pipe_resource *p)
 {
+   assert(p->target != PIPE_BUFFER);
    return (struct etna_resource *)p;
+}
+
+static inline struct etna_buffer_resource *
+etna_buffer_resource(struct pipe_resource *p)
+{
+   assert(p->target == PIPE_BUFFER);
+   return (struct etna_buffer_resource *)p;
 }
 
 void
@@ -301,7 +319,7 @@ resource_written(struct etna_context *ctx, struct pipe_resource *prsc)
 }
 
 enum etna_resource_status
-etna_resource_status(struct etna_context *ctx, struct etna_resource *res);
+etna_resource_status(struct etna_context *ctx, struct pipe_resource *prsc);
 
 /* Allocate Tile Status for an etna resource.
  * Tile status is a cache of the clear status per tile. This means a smaller

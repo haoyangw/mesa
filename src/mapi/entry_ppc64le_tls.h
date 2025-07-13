@@ -31,6 +31,9 @@
 #define HIDDEN
 #endif
 
+#define _U_STRINGIFY(x) #x
+#define U_STRINGIFY(x) _U_STRINGIFY(x)
+
 // NOTE: These must be powers of two:
 #define PPC64LE_ENTRY_SIZE 64
 #define PPC64LE_PAGE_ALIGN 65536
@@ -62,26 +65,3 @@ __asm__(".text\n"
    "  ld     12, " slot "*8(11)\n\t"                            \
    "  mtctr  12\n\t"                                            \
    "  bctr\n"                                                   \
-
-#define MAPI_TMP_STUB_ASM_GCC
-#include "mapi_tmp.h"
-
-#ifndef MAPI_MODE_BRIDGE
-
-#include <string.h>
-
-void
-entry_patch_public(void)
-{
-}
-
-extern char
-ppc64le_entry_start[] HIDDEN;
-
-mapi_func
-entry_get_public(int slot)
-{
-   return (mapi_func) (ppc64le_entry_start + slot * PPC64LE_ENTRY_SIZE);
-}
-
-#endif /* MAPI_MODE_BRIDGE */

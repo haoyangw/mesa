@@ -7,48 +7,9 @@
 #include <assert.h>
 #include <stdbool.h>
 
+#include "nir/radv_meta_nir.h"
 #include "radv_meta.h"
 #include "sid.h"
-
-static nir_shader *
-build_expand_depth_stencil_compute_shader(struct radv_device *dev)
-{
-   const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_2D, false, GLSL_TYPE_FLOAT);
-
-   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_COMPUTE, "expand_depth_stencil_compute");
-
-   /* We need at least 8/8/1 to cover an entire HTILE block in a single workgroup. */
-   b.shader->info.workgroup_size[0] = 8;
-   b.shader->info.workgroup_size[1] = 8;
-   nir_variable *input_img = nir_variable_create(b.shader, nir_var_image, img_type, "in_img");
-   input_img->data.descriptor_set = 0;
-   input_img->data.binding = 0;
-
-   nir_variable *output_img = nir_variable_create(b.shader, nir_var_image, img_type, "out_img");
-   output_img->data.descriptor_set = 0;
-   output_img->data.binding = 1;
-
-   nir_def *invoc_id = nir_load_local_invocation_id(&b);
-   nir_def *wg_id = nir_load_workgroup_id(&b);
-   nir_def *block_size = nir_imm_ivec4(&b, b.shader->info.workgroup_size[0], b.shader->info.workgroup_size[1],
-                                       b.shader->info.workgroup_size[2], 0);
-
-   nir_def *global_id = nir_iadd(&b, nir_imul(&b, wg_id, block_size), invoc_id);
-
-   nir_def *data = nir_image_deref_load(&b, 4, 32, &nir_build_deref_var(&b, input_img)->def, global_id,
-                                        nir_undef(&b, 1, 32), nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D);
-
-   /* We need a SCOPE_DEVICE memory_scope because ACO will avoid
-    * creating a vmcnt(0) because it expects the L1 cache to keep memory
-    * operations in-order for the same workgroup. The vmcnt(0) seems
-    * necessary however. */
-   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
-               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_ssbo);
-
-   nir_image_deref_store(&b, &nir_build_deref_var(&b, output_img)->def, global_id, nir_undef(&b, 1, 32), data,
-                         nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D);
-   return b.shader;
-}
 
 struct radv_htile_expand_key {
    enum radv_meta_object_key_type type;
@@ -76,8 +37,8 @@ get_pipeline_gfx(struct radv_device *device, struct radv_image *image, VkPipelin
       return VK_SUCCESS;
    }
 
-   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices(device);
-   nir_shader *fs_module = radv_meta_build_nir_fs_noop(device);
+   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices(device);
+   nir_shader *fs_module = radv_meta_nir_build_fs_noop(device);
 
    const VkPipelineSampleLocationsStateCreateInfoEXT sample_locs_create_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT,
@@ -355,7 +316,7 @@ get_pipeline_cs(struct radv_device *device, VkPipeline *pipeline_out, VkPipeline
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = build_expand_depth_stencil_compute_shader(device);
+   nir_shader *cs = radv_meta_nir_build_expand_depth_stencil_compute_shader(device);
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -391,7 +352,7 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
    VkPipeline pipeline;
    VkResult result;
 
-   assert(radv_image_is_tc_compat_htile(image));
+   assert(radv_tc_compat_htile_enabled(image, subresourceRange->baseMipLevel));
 
    result = get_pipeline_cs(device, &pipeline, &layout);
    if (result != VK_SUCCESS) {
@@ -441,33 +402,27 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
                               },
                               &(struct radv_image_view_extra_create_info){.disable_compression = true});
 
-         radv_meta_push_descriptor_set(
-            cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2,
-            (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                      .dstBinding = 0,
-                                      .dstArrayElement = 0,
-                                      .descriptorCount = 1,
-                                      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                      .pImageInfo =
-                                         (VkDescriptorImageInfo[]){
-                                            {
-                                               .sampler = VK_NULL_HANDLE,
-                                               .imageView = radv_image_view_to_handle(&load_iview),
-                                               .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                            },
-                                         }},
-                                     {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                      .dstBinding = 1,
-                                      .dstArrayElement = 0,
-                                      .descriptorCount = 1,
-                                      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                      .pImageInfo = (VkDescriptorImageInfo[]){
-                                         {
-                                            .sampler = VK_NULL_HANDLE,
-                                            .imageView = radv_image_view_to_handle(&store_iview),
-                                            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                         },
-                                      }}});
+         radv_meta_bind_descriptors(
+            cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 2,
+            (VkDescriptorGetInfoEXT[]){{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+                                        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                        .data.pStorageImage =
+                                           (VkDescriptorImageInfo[]){
+                                              {
+                                                 .sampler = VK_NULL_HANDLE,
+                                                 .imageView = radv_image_view_to_handle(&load_iview),
+                                                 .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                              },
+                                           }},
+                                       {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
+                                        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                        .data.pStorageImage = (VkDescriptorImageInfo[]){
+                                           {
+                                              .sampler = VK_NULL_HANDLE,
+                                              .imageView = radv_image_view_to_handle(&store_iview),
+                                              .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                           },
+                                        }}});
 
          radv_unaligned_dispatch(cmd_buffer, width, height, 1);
 
@@ -501,6 +456,7 @@ radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
    if (cmd_buffer->qf == RADV_QUEUE_GENERAL) {
       radv_process_depth_stencil(cmd_buffer, image, subresourceRange, sample_locs);
    } else {
+      assert(cmd_buffer->qf == RADV_QUEUE_COMPUTE);
       radv_expand_depth_stencil_compute(cmd_buffer, image, subresourceRange);
    }
 }

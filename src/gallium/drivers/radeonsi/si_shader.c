@@ -10,6 +10,7 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_serialize.h"
+#include "nir_tcs_info.h"
 #include "nir_xfb_info.h"
 #include "si_pipe.h"
 #include "si_shader_internal.h"
@@ -20,14 +21,7 @@
 #include "util/ralloc.h"
 #include "util/u_upload_mgr.h"
 
-#if LLVM_AVAILABLE
-#include <llvm/Config/llvm-config.h> /* for LLVM_VERSION_MAJOR */
-#else
-#define LLVM_VERSION_MAJOR 0
-#endif
-
 static const char scratch_rsrc_dword0_symbol[] = "SCRATCH_RSRC_DWORD0";
-
 static const char scratch_rsrc_dword1_symbol[] = "SCRATCH_RSRC_DWORD1";
 
 static void si_dump_shader_key(const struct si_shader *shader, FILE *f);
@@ -300,15 +294,7 @@ static void declare_vs_blit_inputs(struct si_shader *shader, struct si_shader_ar
    ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL);                /* depth */
 
    if (info->vs.blit_sgprs_amd ==
-       SI_VS_BLIT_SGPRS_POS_COLOR + has_attribute_ring_address) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color0 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color1 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color2 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color3 */
-      if (has_attribute_ring_address)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* attribute ring address */
-   } else if (info->vs.blit_sgprs_amd ==
-              SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
+       SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.y1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x2 */
@@ -1661,8 +1647,7 @@ static bool si_nir_kill_outputs(nir_shader *nir, const union si_shader_key *key)
        !key->ge.opt.kill_layer &&
        !key->ge.opt.kill_clip_distances &&
        !(nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_LAYER))) {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
    bool progress = false;
@@ -1726,13 +1711,7 @@ static bool si_nir_kill_outputs(nir_shader *nir, const union si_shader_key *key)
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 static unsigned si_map_io_driver_location(unsigned semantic)
@@ -1828,6 +1807,8 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
       .kill_layer = key->ge.opt.kill_layer,
       .force_vrs = sel->screen->options.vrs2x2,
       .use_gfx12_xfb_intrinsic = !nir->info.use_aco_amd,
+      .skip_viewport_state_culling = sel->info.writes_viewport_index,
+      .use_point_tri_intersection = sel->screen->info.num_cu / sel->screen->info.num_se >= 12,
    };
 
    if (nir->info.stage == MESA_SHADER_VERTEX ||
@@ -2050,8 +2031,7 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
       nir_def *back_color = NULL;
       if (interp_mode == INTERP_MODE_FLAT) {
          colors[i] = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
-                                   .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                   .io_semantics.num_slots = 1);
+                                   .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
@@ -2079,14 +2059,12 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
 
          colors[i] =
             nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                        .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                        .io_semantics.num_slots = 1);
+                                        .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color =
                nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                           .io_semantics.location = VARYING_SLOT_BFC0 + i,
-                                           .io_semantics.num_slots = 1);
+                                           .io_semantics.location = VARYING_SLOT_BFC0 + i);
          }
       }
 
@@ -2129,8 +2107,7 @@ static bool si_nir_emit_polygon_stipple(nir_shader *nir)
    nir_def *pass = nir_i2b(b, bit);
    nir_discard_if(b, nir_inot(b, pass));
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader)
@@ -2139,16 +2116,13 @@ bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *sha
       shader->info.shared_size > 0 && sscreen->options.clear_lds;
 }
 
-static bool clamp_shadow_comparison_value(nir_builder *b, nir_instr *instr, void *state)
+static bool clamp_shadow_comparison_value(nir_builder *b, nir_tex_instr *tex,
+                                          void *state)
 {
-   if (instr->type != nir_instr_type_tex)
+   if (!tex->is_shadow || tex->op == nir_texop_lod)
       return false;
 
-   nir_tex_instr *tex = nir_instr_as_tex(instr);
-   if (!tex->is_shadow)
-      return false;
-
-   b->cursor = nir_before_instr(instr);
+   b->cursor = nir_before_instr(&tex->instr);
 
    int samp_index = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
    int comp_index = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
@@ -2183,9 +2157,8 @@ static bool si_nir_clamp_shadow_comparison_value(nir_shader *nir)
     * Z24 anymore. Do it manually here for GFX8-9; GFX10 has
     * an explicitly clamped 32-bit float format.
     */
-   return nir_shader_instructions_pass(nir, clamp_shadow_comparison_value,
-                                       nir_metadata_control_flow,
-                                       NULL);
+   return nir_shader_tex_pass(nir, clamp_shadow_comparison_value,
+                              nir_metadata_control_flow, NULL);
 }
 
 static void
@@ -2508,7 +2481,6 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
                .lower_quad_broadcast_dynamic_to_const = sel->screen->info.gfx_level <= GFX7,
                .lower_shuffle_to_swizzle_amd = true,
                .lower_ballot_bit_count_to_mbcnt_amd = true,
-               .lower_inverse_ballot = !nir->info.use_aco_amd && LLVM_VERSION_MAJOR < 17,
                .lower_boolean_reduce = nir->info.use_aco_amd,
                .lower_boolean_shuffle = true,
             });
@@ -2527,13 +2499,28 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
    }
 
    NIR_PASS_V(nir, nir_divergence_analysis); /* required by ac_nir_flag_smem_for_loads */
+   /* This is required by ac_nir_scalarize_overfetching_loads_callback. */
    NIR_PASS(progress, nir, ac_nir_flag_smem_for_loads, sel->screen->info.gfx_level,
-            !sel->info.base.use_aco_amd, true);
+            !sel->info.base.use_aco_amd, false);
+   /* Scalarize overfetching loads, so that we don't load more components than necessary.
+    * Adjacent loads will be re-vectorized with a conservative overfetching limit.
+    */
    NIR_PASS(progress, nir, nir_lower_io_to_scalar,
             nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_mem_global,
             ac_nir_scalarize_overfetching_loads_callback, &sel->screen->info.gfx_level);
+   /* Scalarize shared memory ops to get ds_load_2addr/ds_store_2addr more often.
+    * If we don't do that, we might get pairs of ds_load_2addr + ds_load for vec3 loads, etc.
+    */
+   NIR_PASS(progress, nir, nir_lower_io_to_scalar, nir_var_mem_shared, NULL, NULL);
    NIR_PASS(progress, nir, si_nir_lower_resource, shader, &ctx->args);
 
+   /* This must be done before load/store vectorization to lower 16-bit SMEM loads to 32 bits,
+    * so that they can be vectorized as 32-bit loads. 16-bit loads are never vectorized.
+    */
+   NIR_PASS(progress, nir, ac_nir_lower_mem_access_bit_sizes,
+            sel->screen->info.gfx_level, !nir->info.use_aco_amd);
+
+   /* Load/store vectorization requires that offset computations are optimized. */
    if (progress) {
       si_nir_opts(sel->screen, nir, false);
       progress = false;
@@ -2550,19 +2537,20 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
                 */
                .has_shared2_amd = sel->screen->info.gfx_level >= GFX7,
             });
+
+   /* This must be done again if 8-bit or 16-bit buffer stores were vectorized. */
    NIR_PASS(progress, nir, ac_nir_lower_mem_access_bit_sizes,
             sel->screen->info.gfx_level, !nir->info.use_aco_amd);
 
-   if (nir->info.stage == MESA_SHADER_KERNEL) {
+   if (nir->info.stage == MESA_SHADER_KERNEL)
       NIR_PASS(progress, nir, ac_nir_lower_global_access);
 
-      if (nir->info.bit_sizes_int & (8 | 16)) {
-         if (sel->screen->info.gfx_level >= GFX8)
-            nir_divergence_analysis(nir);
+   if (ac_nir_might_lower_bit_size(nir)) {
+      if (sel->screen->info.gfx_level >= GFX8)
+         nir_divergence_analysis(nir);
 
-         NIR_PASS(progress, nir, nir_lower_bit_size, ac_nir_lower_bit_size_callback,
-                  &sel->screen->info.gfx_level);
-      }
+      NIR_PASS(progress, nir, nir_lower_bit_size, ac_nir_lower_bit_size_callback,
+               &sel->screen->info.gfx_level);
    }
 
    /* This must be after lowering resources to descriptor loads and before lowering intrinsics
@@ -3363,7 +3351,7 @@ static void si_get_ps_prolog_key(struct si_shader *shader, union si_shader_part_
    key->ps_prolog.colors_read = shader->info.ps_colors_read;
    key->ps_prolog.num_input_sgprs = shader->info.num_input_sgprs;
    key->ps_prolog.wqm =
-      info->base.fs.needs_quad_helper_invocations &&
+      info->base.fs.needs_coarse_quad_helper_invocations &&
       (key->ps_prolog.colors_read || key->ps_prolog.states.force_persp_sample_interp ||
        key->ps_prolog.states.force_linear_sample_interp ||
        key->ps_prolog.states.force_persp_center_interp ||

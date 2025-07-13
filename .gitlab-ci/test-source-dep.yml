@@ -40,7 +40,7 @@
 .restricted-rules:
   rules:
     # If the triggerer has access to the restricted traces and if it is pre-merge
-    - if: '($GITLAB_USER_LOGIN !~ "/^(robclark|anholt|flto|cwabbott0|Danil|tomeu|okias|gallo|kwg|llanderwelin|zmike|vigneshraman|Valentine)$/") &&
+    - if: '($GITLAB_USER_LOGIN !~ "/^(robclark|anholt|flto|cwabbott0|Danil|tomeu|okias|gallo|kwg|llanderwelin|zmike|vigneshraman|Valentine|daniels)$/") &&
            ($GITLAB_USER_LOGIN != "marge-bot" || $CI_COMMIT_BRANCH)'
       when: never
 
@@ -55,7 +55,7 @@
         - .gitlab-ci/**/*
         - include/**/*
         - meson.build
-        - meson_options.txt
+        - meson.options
         - build-support/**/*
         - subprojects/**/*
         - .gitattributes
@@ -155,7 +155,6 @@
         - src/gallium/frontends/dri/*
         - src/gallium/frontends/glx/**/*
         - src/gallium/targets/**/*
-        - src/gallium/tests/**/*
         - src/gallium/winsys/*
       when: on_success
 

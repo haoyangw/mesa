@@ -25,6 +25,7 @@
 #include "nv_push_cla097.h"
 #include "nv_push_clb097.h"
 #include "nv_push_clb197.h"
+#include "nv_push_clc197.h"
 #include "nv_push_clc397.h"
 #include "nv_push_clc597.h"
 #include "drf.h"
@@ -33,7 +34,7 @@ static inline uint16_t
 nvk_cmd_buffer_3d_cls(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    return pdev->info.cls_eng3d;
 }
 
@@ -106,7 +107,7 @@ VkResult
 nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    /* 3D state */
    P_MTHD(p, NV9097, SET_OBJECT);
@@ -515,6 +516,21 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_NV9097_SET_VERTEX_STREAM_SUBSTITUTE_A(p, zero_addr >> 32);
    P_NV9097_SET_VERTEX_STREAM_SUBSTITUTE_B(p, zero_addr);
 
+   if (pdev->info.cls_eng3d >= VOLTA_A) {
+      /* These WATERMARK settings are based on what the blob sets. I'm guessing
+       * these are thresholds for balancing PS vs VS shaders but I'm not sure.
+       * We could do this on older cards if we knew what values to set.
+       */
+      P_IMMD(p, NV9097, SET_PS_WARP_WATERMARKS, {
+         .low = 0x8,
+         .high = pdev->info.max_warps_per_mp * pdev->info.mp_per_tpc,
+      });
+      P_IMMD(p, NV9097, SET_PS_REGISTER_WATERMARKS, {
+         .low = 0x80,
+         .high = 0x1000,
+      });
+   }
+
    P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_VB_ENABLES));
    P_NV9097_SET_MME_SHADOW_SCRATCH(p, NVK_MME_SCRATCH_VB_ENABLES, 0);
    for (uint32_t b = 0; b < 32; b++) {
@@ -530,6 +546,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       P_MTHD(p, NV9097, SET_VAB_MEMORY_AREA_A);
       P_NV9097_SET_VAB_MEMORY_AREA_A(p, vab_addr >> 32);
       P_NV9097_SET_VAB_MEMORY_AREA_B(p, vab_addr);
+      assert(dev->vab_memory->va->size_B == 256 * 1024);
       P_NV9097_SET_VAB_MEMORY_AREA_C(p, SIZE_BYTES_256K);
    }
 
@@ -1676,7 +1693,7 @@ static void
 nvk_flush_vi_state(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
 
@@ -1808,7 +1825,7 @@ static void
 nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
@@ -3330,7 +3347,7 @@ nvk_mme_bind_cbuf_desc(struct mme_builder *b)
 
    struct mme_value cb = mme_alloc_reg(b);
    mme_if(b, ieq, size, mme_zero()) {
-      /* Bottim bit is the valid bit, 8:4 are shader slot */
+      /* Bottom bit is the valid bit, 8:4 are shader slot */
       mme_merge_to(b, cb, mme_zero(), group_slot, 4, 5, 4);
    }
 
@@ -3370,7 +3387,7 @@ void
 nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
    struct nvk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
@@ -3823,18 +3840,27 @@ nvk_mme_build_draw_loop(struct mme_builder *b,
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   mme_loop(b, instance_count) {
-      mme_mthd(b, NV9097_BEGIN);
-      mme_emit(b, begin);
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
+      mme_start_loop(b, instance_count);
+   } else {
+      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+      mme_emit(b, instance_count);
+      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+   }
 
-      mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
-      mme_emit(b, first_vertex);
-      mme_emit(b, vertex_count);
+   mme_mthd(b, NV9097_BEGIN);
+   mme_emit(b, begin);
 
-      mme_mthd(b, NV9097_END);
-      mme_emit(b, mme_zero());
+   mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
+   mme_emit(b, first_vertex);
+   mme_emit(b, vertex_count);
 
+   mme_mthd(b, NV9097_END);
+   mme_emit(b, mme_zero());
+
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
       mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+      mme_end_loop(b);
    }
 
    mme_free_reg(b, begin);
@@ -3959,18 +3985,27 @@ nvk_mme_build_draw_indexed_loop(struct mme_builder *b,
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   mme_loop(b, instance_count) {
-      mme_mthd(b, NV9097_BEGIN);
-      mme_emit(b, begin);
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
+      mme_start_loop(b, instance_count);
+   } else {
+      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+      mme_emit(b, instance_count);
+      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+   }
 
-      mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
-      mme_emit(b, first_index);
-      mme_emit(b, index_count);
+   mme_mthd(b, NV9097_BEGIN);
+   mme_emit(b, begin);
 
-      mme_mthd(b, NV9097_END);
-      mme_emit(b, mme_zero());
+   mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
+   mme_emit(b, first_index);
+   mme_emit(b, index_count);
 
+   mme_mthd(b, NV9097_END);
+   mme_emit(b, mme_zero());
+
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
       mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+      mme_end_loop(b);
    }
 
    mme_free_reg(b, begin);
@@ -4427,6 +4462,10 @@ nvk_mme_xfb_draw_indirect_loop(struct mme_builder *b,
                                struct mme_value counter)
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
+
+   /* NVC197_BEGIN_INSTANCE_ITERATE_ENABLE seems to be incompatible with xfb.
+    * Always use an mme loop instead.
+    */
 
    mme_loop(b, instance_count) {
       mme_mthd(b, NV9097_BEGIN);

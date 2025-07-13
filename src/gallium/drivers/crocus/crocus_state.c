@@ -2859,8 +2859,6 @@ crocus_create_surface(struct pipe_context *ctx,
    pipe_resource_reference(&psurf->texture, tex);
    psurf->context = ctx;
    psurf->format = tmpl->format;
-   psurf->width = tex->width0;
-   psurf->height = tex->height0;
    psurf->u.tex.first_layer = tmpl->u.tex.first_layer;
    psurf->u.tex.last_layer = tmpl->u.tex.last_layer;
    psurf->u.tex.level = tmpl->u.tex.level;
@@ -2907,8 +2905,7 @@ crocus_create_surface(struct pipe_context *ctx,
                                           res->base.b.target == PIPE_TEXTURE_3D ? 0 : tmpl->u.tex.first_layer,
                                           res->base.b.target == PIPE_TEXTURE_3D ? tmpl->u.tex.first_layer : 0,
                                           &temp_offset, &temp_x, &temp_y);
-      if (!devinfo->has_surface_tile_offset &&
-          (temp_x || temp_y)) {
+      if (devinfo->verx10 == 40 && (temp_x || temp_y)) {
          /* Original gfx4 hardware couldn't draw to a non-tile-aligned
           * destination.
           */
@@ -3000,9 +2997,6 @@ crocus_create_surface(struct pipe_context *ctx,
    surf->surf.phys_level0_sa = isl_surf_get_phys_level0_el(&surf->surf);
    tile_x_sa /= fmtl->bw;
    tile_y_sa /= fmtl->bh;
-
-   psurf->width = surf->surf.logical_level0_px.width;
-   psurf->height = surf->surf.logical_level0_px.height;
 
    return psurf;
 }
@@ -3140,7 +3134,6 @@ crocus_set_sampler_views(struct pipe_context *ctx,
                          enum pipe_shader_type p_stage,
                          unsigned start, unsigned count,
                          unsigned unbind_num_trailing_slots,
-                         bool take_ownership,
                          struct pipe_sampler_view **views)
 {
    struct crocus_context *ice = (struct crocus_context *) ctx;
@@ -3152,14 +3145,8 @@ crocus_set_sampler_views(struct pipe_context *ctx,
    for (unsigned i = 0; i < count; i++) {
       struct pipe_sampler_view *pview = views ? views[i] : NULL;
 
-      if (take_ownership) {
-         pipe_sampler_view_reference((struct pipe_sampler_view **)
-                                     &shs->textures[start + i], NULL);
-         shs->textures[start + i] = (struct crocus_sampler_view *)pview;
-      } else {
-         pipe_sampler_view_reference((struct pipe_sampler_view **)
-                                     &shs->textures[start + i], pview);
-      }
+      pipe_sampler_view_reference((struct pipe_sampler_view **)
+                                    &shs->textures[start + i], pview);
 
       struct crocus_sampler_view *view = (void *) pview;
       if (view) {
@@ -4956,8 +4943,8 @@ emit_null_fb_surface(struct crocus_batch *batch,
    layer = 0;
 
    if (cso->nr_cbufs == 0 && cso->zsbuf) {
-      width = cso->zsbuf->width;
-      height = cso->zsbuf->height;
+      width = ((struct crocus_surface*)cso->zsbuf)->surf.logical_level0_px.width;
+      height = ((struct crocus_surface*)cso->zsbuf)->surf.logical_level0_px.height;
       level = cso->zsbuf->u.tex.level;
       layer = cso->zsbuf->u.tex.first_layer;
    }
@@ -8329,7 +8316,6 @@ crocus_rebind_buffer(struct crocus_context *ice,
                                  PIPE_BIND_BLENDABLE |
                                  PIPE_BIND_DISPLAY_TARGET |
                                  PIPE_BIND_CURSOR |
-                                 PIPE_BIND_COMPUTE_RESOURCE |
                                  PIPE_BIND_GLOBAL)));
 
    if (res->bind_history & PIPE_BIND_VERTEX_BUFFER) {
@@ -9274,6 +9260,7 @@ genX(crocus_init_state)(struct crocus_context *ice)
    ctx->set_vertex_buffers = crocus_set_vertex_buffers;
    ctx->set_viewport_states = crocus_set_viewport_states;
    ctx->sampler_view_destroy = crocus_sampler_view_destroy;
+   ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->surface_destroy = crocus_surface_destroy;
    ctx->draw_vbo = crocus_draw_vbo;
    ctx->launch_grid = crocus_launch_grid;

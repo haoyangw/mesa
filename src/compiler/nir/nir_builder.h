@@ -79,6 +79,10 @@ typedef bool (*nir_intrinsic_pass_cb)(struct nir_builder *,
                                       nir_intrinsic_instr *, void *);
 typedef bool (*nir_alu_pass_cb)(struct nir_builder *,
                                 nir_alu_instr *, void *);
+typedef bool (*nir_tex_pass_cb)(struct nir_builder *,
+                                nir_tex_instr *, void *);
+typedef bool (*nir_phi_pass_cb)(struct nir_builder *,
+                                nir_phi_instr *, void *);
 
 /**
  * Iterates over all the instructions in a NIR function and calls the given pass
@@ -105,13 +109,7 @@ nir_function_instructions_pass(nir_function_impl *impl,
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, preserved);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, preserved);
 }
 
 /**
@@ -141,6 +139,37 @@ nir_shader_instructions_pass(nir_shader *shader,
 }
 
 /**
+ * Iterates over all the intrinsics in a NIR function and calls the given pass
+ * on them.
+ *
+ * The pass should return true if it modified the shader.  In that case, only
+ * the preserved metadata flags will be preserved in the function impl.
+ *
+ * The builder will be initialized to point at the function impl, but its
+ * cursor is unset.
+ */
+static inline bool
+nir_function_intrinsics_pass(nir_function_impl *impl,
+                             nir_intrinsic_pass_cb pass,
+                             nir_metadata preserved,
+                             void *cb_data)
+{
+   bool progress = false;
+   nir_builder b = nir_builder_create(impl);
+
+   nir_foreach_block_safe(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic) {
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            progress |= pass(&b, intr, cb_data);
+         }
+      }
+   }
+
+   return nir_progress(progress, impl, preserved);
+}
+
+/**
  * Iterates over all the intrinsics in a NIR shader and calls the given pass on
  * them.
  *
@@ -159,24 +188,7 @@ nir_shader_intrinsics_pass(nir_shader *shader,
    bool progress = false;
 
    nir_foreach_function_impl(impl, shader) {
-      bool func_progress = false;
-      nir_builder b = nir_builder_create(impl);
-
-      nir_foreach_block_safe(block, impl) {
-         nir_foreach_instr_safe(instr, block) {
-            if (instr->type == nir_instr_type_intrinsic) {
-               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-               func_progress |= pass(&b, intr, cb_data);
-            }
-         }
-      }
-
-      if (func_progress) {
-         nir_metadata_preserve(impl, preserved);
-         progress = true;
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
-      }
+      progress |= nir_function_intrinsics_pass(impl, pass, preserved, cb_data);
    }
 
    return progress;
@@ -204,12 +216,58 @@ nir_shader_alu_pass(nir_shader *shader,
          }
       }
 
-      if (func_progress) {
-         nir_metadata_preserve(impl, preserved);
-         progress = true;
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
+      progress |= nir_progress(func_progress, impl, preserved);
+   }
+
+   return progress;
+}
+
+/* As above, but for textures */
+static inline bool
+nir_shader_tex_pass(nir_shader *shader, nir_tex_pass_cb pass,
+                    nir_metadata preserved, void *cb_data)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      bool func_progress = false;
+      nir_builder b = nir_builder_create(impl);
+
+      nir_foreach_block_safe(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               func_progress |= pass(&b, tex, cb_data);
+            }
+         }
       }
+
+      progress |= nir_progress(func_progress, impl, preserved);
+   }
+
+   return progress;
+}
+
+/* As above, but for phis */
+static inline bool
+nir_shader_phi_pass(nir_shader *shader,
+                    nir_phi_pass_cb pass,
+                    nir_metadata preserved,
+                    void *cb_data)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      bool func_progress = false;
+      nir_builder b = nir_builder_create(impl);
+
+      nir_foreach_block_safe(block, impl) {
+         nir_foreach_phi_safe(phi, block) {
+            func_progress |= pass(&b, phi, cb_data);
+         }
+      }
+
+      progress |= nir_progress(func_progress, impl, preserved);
    }
 
    return progress;
@@ -977,18 +1035,19 @@ _nir_mul_imm(nir_builder *build, nir_def *x, uint64_t y, bool amul)
    assert(x->bit_size <= 64);
    y &= BITFIELD64_MASK(x->bit_size);
 
+   if (amul && build->shader->options)
+      amul &= build->shader->options->has_amul;
+
    if (y == 0) {
       return nir_imm_intN_t(build, 0, x->bit_size);
    } else if (y == 1) {
       return x;
-   } else if ((!build->shader->options ||
-               !build->shader->options->lower_bitops) &&
-              !(amul && (!build->shader->options ||
-                         build->shader->options->has_amul)) &&
-              util_is_power_of_two_or_zero64(y)) {
-      return nir_ishl(build, x, nir_imm_int(build, ffsll(y) - 1));
    } else if (amul) {
       return nir_amul(build, x, nir_imm_intN_t(build, y, x->bit_size));
+   } else if ((!build->shader->options ||
+               !build->shader->options->lower_bitops) &&
+              util_is_power_of_two_or_zero64(y)) {
+      return nir_ishl(build, x, nir_imm_int(build, ffsll(y) - 1));
    } else {
       return nir_imul(build, x, nir_imm_intN_t(build, y, x->bit_size));
    }
@@ -2317,10 +2376,14 @@ nir_gen_rect_vertices(nir_builder *b, nir_def *z, nir_def *w);
 /* Emits a printf in the same way nir_lower_printf(). Each of the variadic
  * argument is a pointer to a nir_def value.
  */
-void nir_printf_fmt(nir_builder *b,
-                    bool use_printf_base_identifier,
-                    unsigned ptr_bit_size,
+void nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size,
                     const char *fmt, ...);
+
+/* Call a serialized function. This is used internally by vtn_bindgen, it is not
+ * intended for end-users of NIR.
+ */
+nir_def *nir_call_serialized(nir_builder *build, const uint32_t *serialized,
+                             size_t serialized_size_B, nir_def **args);
 
 #ifdef __cplusplus
 } /* extern "C" */

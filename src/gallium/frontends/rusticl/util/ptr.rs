@@ -4,7 +4,7 @@ use std::{
     hash::{Hash, Hasher},
     mem,
     ops::{Add, Deref},
-    ptr::{self, NonNull},
+    ptr::NonNull,
 };
 
 /// A wrapper around pointers to C data type which are considered thread safe.
@@ -54,32 +54,42 @@ unsafe impl<T> Send for ThreadSafeCPtr<T> {}
 unsafe impl<T> Sync for ThreadSafeCPtr<T> {}
 
 pub trait CheckedPtr<T> {
+    /// Copies `count * size_of::<T>()` bytes from `src` to `self`. The source
+    /// and destination may overlap.
+    ///
     /// # Safety
     ///
-    /// besides a null check the function can't make sure the pointer is valid
-    /// for the entire size
-    unsafe fn copy_checked(self, val: *const T, size: usize);
-    fn write_checked(self, val: T);
+    /// The nullity of `self` is checked. `self` and `src` must fulfill all
+    /// other invariants of [`std::ptr::copy`].
+    unsafe fn copy_from_checked(self, src: *const T, count: usize);
+
+    /// Overwrites a memory location with the given value without reading or
+    /// dropping the old value.
+    ///
+    /// # Safety
+    ///
+    /// The nullity of `self` is checked. `self` must fulfill all other
+    /// invariants of [`std::ptr::write`].
+    unsafe fn write_checked(self, val: T);
 }
 
 impl<T> CheckedPtr<T> for *mut T {
-    /// # Safety
-    ///
-    /// This function follows the same safety rules as `std::ptr::copy` except that it already
-    /// checks for a NULL pointer.
-    unsafe fn copy_checked(self, val: *const T, size: usize) {
+    unsafe fn copy_from_checked(self, src: *const T, count: usize) {
         if !self.is_null() {
-            // SAFETY: we move the responsibilities up to the caller
+            // SAFETY: Caller is responsible for satisfying all invariants save
+            // pointer nullity.
             unsafe {
-                ptr::copy(val, self, size);
+                self.copy_from(src, count);
             }
         }
     }
 
-    fn write_checked(self, val: T) {
+    unsafe fn write_checked(self, val: T) {
         if !self.is_null() {
+            // SAFETY: Caller is responsible for satisfying all invariants save
+            // pointer nullity.
             unsafe {
-                *self = val;
+                self.write(val);
             }
         }
     }

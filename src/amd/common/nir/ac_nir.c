@@ -57,6 +57,7 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
    options->lower_unpack_unorm_4x8 = true;
    options->lower_unpack_half_2x16 = true;
    options->lower_fpow = true;
+   options->lower_mul_high16 = true;
    options->lower_mul_2x32_64 = true;
    options->lower_iadd_sat = info->gfx_level <= GFX8;
    options->lower_hadd = true;
@@ -82,6 +83,7 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
    options->has_fmulz = true;
    options->has_msad = true;
    options->has_shfr32 = true;
+   options->has_mul24_relaxed = true;
    options->lower_int64_options = nir_lower_imul64 | nir_lower_imul_high64 | nir_lower_imul_2x32_64 | nir_lower_divmod64 |
                                   nir_lower_minmax64 | nir_lower_iabs64 | nir_lower_iadd_sat64 | nir_lower_conv64;
    options->divergence_analysis_options = nir_divergence_view_index_uniform;
@@ -333,18 +335,14 @@ ac_nir_optimize_uniform_atomics(nir_shader *nir)
 {
    bool progress = false;
    NIR_PASS(progress, nir, ac_nir_opt_shared_append);
-
-   nir_divergence_analysis(nir);
    NIR_PASS(progress, nir, nir_opt_uniform_atomics, false);
 
    return progress;
 }
 
-unsigned
-ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data)
+static unsigned
+lower_bit_size_callback(const nir_instr *instr, enum amd_gfx_level chip, bool divergence_known)
 {
-   enum amd_gfx_level chip = *(enum amd_gfx_level *)data;
-
    if (instr->type != nir_instr_type_alu)
       return 0;
    nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -374,10 +372,10 @@ ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data)
       case nir_op_isign:
       case nir_op_uadd_sat:
       case nir_op_usub_sat:
-         return (bit_size == 8 || !(chip >= GFX8 && alu->def.divergent)) ? 32 : 0;
+         return (!divergence_known || bit_size == 8 || !(chip >= GFX8 && alu->def.divergent)) ? 32 : 0;
       case nir_op_iadd_sat:
       case nir_op_isub_sat:
-         return bit_size == 8 || !alu->def.divergent ? 32 : 0;
+         return !divergence_known || bit_size == 8 || !alu->def.divergent ? 32 : 0;
 
       default:
          return 0;
@@ -399,13 +397,35 @@ ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data)
       case nir_op_uge:
       case nir_op_bitz:
       case nir_op_bitnz:
-         return (bit_size == 8 || !(chip >= GFX8 && alu->def.divergent)) ? 32 : 0;
+         return (!divergence_known || bit_size == 8 || !(chip >= GFX8 && alu->def.divergent)) ? 32 : 0;
       default:
          return 0;
       }
    }
 
    return 0;
+}
+
+unsigned
+ac_nir_lower_bit_size_callback(const nir_instr *instr, void *data)
+{
+   enum amd_gfx_level chip = *(enum amd_gfx_level *)data;
+   return lower_bit_size_callback(instr, chip, true);
+}
+
+bool
+ac_nir_might_lower_bit_size(const nir_shader *shader)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (lower_bit_size_callback(instr, CLASS_UNKNOWN, false))
+               return true;
+         }
+      }
+   }
+
+   return false;
 }
 
 static unsigned
@@ -442,14 +462,17 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
                     low->intrinsic == nir_intrinsic_load_smem_amd ||
                     low->intrinsic == nir_intrinsic_load_push_constant;
    bool is_store = !nir_intrinsic_infos[low->intrinsic].has_dest;
-   bool is_scratch = low->intrinsic == nir_intrinsic_load_stack ||
-                     low->intrinsic == nir_intrinsic_store_stack ||
-                     low->intrinsic == nir_intrinsic_load_scratch ||
-                     low->intrinsic == nir_intrinsic_store_scratch;
+   bool swizzled = low->intrinsic == nir_intrinsic_load_stack ||
+                    low->intrinsic == nir_intrinsic_store_stack ||
+                    low->intrinsic == nir_intrinsic_load_scratch ||
+                    low->intrinsic == nir_intrinsic_store_scratch ||
+                    (nir_intrinsic_has_access(low) &&
+                     nir_intrinsic_access(low) & ACCESS_IS_SWIZZLED_AMD);
    bool is_shared = low->intrinsic == nir_intrinsic_load_shared ||
                     low->intrinsic == nir_intrinsic_store_shared ||
                     low->intrinsic == nir_intrinsic_load_deref ||
                     low->intrinsic == nir_intrinsic_store_deref;
+   unsigned swizzle_element_size = config->gfx_level <= GFX8 ? 4 : 16;
 
    assert(!is_store || hole_size <= 0);
 
@@ -480,6 +503,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
    case nir_intrinsic_store_deref:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_store_shared:
+   case nir_intrinsic_load_buffer_amd:
+   case nir_intrinsic_store_buffer_amd:
       break;
    default:
       return false;
@@ -501,7 +526,7 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
          return false;
 
       /* GFX6-8 only support 32-bit scratch loads/stores. */
-      if (config->gfx_level <= GFX8 && is_scratch && aligned_new_size > 32)
+      if (swizzled && aligned_new_size > (swizzle_element_size * 8))
          return false;
    }
 
@@ -565,6 +590,15 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
       align = 1 << (ffs(align_offset) - 1);
    else
       align = align_mul;
+
+   /* Don't cross swizzle elements. stack/scratch intrinsics use scratch_* instructions, which
+    * seem to work fine.
+    */
+   if ((low->intrinsic == nir_intrinsic_load_buffer_amd ||
+        low->intrinsic == nir_intrinsic_store_buffer_amd) && swizzled &&
+       (align_offset % swizzle_element_size + unaligned_new_size / 8u) > MIN2(align_mul, swizzle_element_size)) {
+      return false;
+   }
 
    /* Validate the alignment and number of components. */
    if (!is_shared) {

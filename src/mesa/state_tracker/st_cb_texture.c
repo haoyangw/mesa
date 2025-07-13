@@ -1770,26 +1770,29 @@ try_pbo_upload_common(struct gl_context *ctx,
          goto fail;
 
       pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 1, 0,
-                              false, &sampler_view);
+                              &sampler_view);
       st->state.num_sampler_views[PIPE_SHADER_FRAGMENT] =
          MAX2(st->state.num_sampler_views[PIPE_SHADER_FRAGMENT], 1);
 
-      pipe_sampler_view_reference(&sampler_view, NULL);
+      pipe_sampler_view_release(sampler_view);
    }
+
+   uint16_t width, height;
+   pipe_surface_size(surface, &width, &height);
 
    /* Framebuffer_state */
    {
       struct pipe_framebuffer_state fb;
       memset(&fb, 0, sizeof(fb));
-      fb.width = surface->width;
-      fb.height = surface->height;
+      fb.width = width;
+      fb.height = height;
       fb.nr_cbufs = 1;
       fb.cbufs[0] = surface;
 
       cso_set_framebuffer(cso, &fb);
    }
 
-   cso_set_viewport_dims(cso, surface->width, surface->height, false);
+   cso_set_viewport_dims(cso, width, height, false);
 
    /* Blend state */
    cso_set_blend(cso, &st->pbo.upload_blend);
@@ -1804,7 +1807,7 @@ try_pbo_upload_common(struct gl_context *ctx,
    /* Set up the fragment shader */
    cso_set_fragment_shader_handle(cso, fs);
 
-   success = st_pbo_draw(st, addr, surface->width, surface->height);
+   success = st_pbo_draw(st, addr, width, height);
 
 fail:
    /* Unbind all because st/mesa won't do it if the current shader doesn't
@@ -2039,8 +2042,8 @@ try_pbo_download(struct st_context *st,
       if (sampler_view == NULL)
          goto fail;
 
-      pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 1, 0, true, &sampler_view);
-      sampler_view = NULL;
+      pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 1, 0, &sampler_view);
+      pipe->sampler_view_release(pipe, sampler_view);
 
       cso_set_samplers(cso, PIPE_SHADER_FRAGMENT, 1, samplers);
    }
@@ -3285,6 +3288,9 @@ st_finalize_texture(struct gl_context *ctx,
    if (!tObj->pt && !tObj->NullTexture) {
       GLuint bindings = default_bindings(st, firstImageFormat);
 
+      if (tObj->IsProtected) 
+         bindings |= PIPE_BIND_PROTECTED;
+
       tObj->pt = st_texture_create(st,
                                     gl_target_to_pipe(tObj->Target),
                                     firstImageFormat,
@@ -3449,6 +3455,9 @@ st_texture_storage(struct gl_context *ctx,
       memObj->TextureTiling = texObj->TextureTiling;
       bindings |= PIPE_BIND_SHARED;
    }
+
+   if (texObj->IsProtected)
+      bindings |= PIPE_BIND_PROTECTED;
 
    if (num_samples > 0) {
       /* Find msaa sample count which is actually supported.  For example,

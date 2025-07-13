@@ -4,6 +4,8 @@
 use crate::api::{GetDebugFlags, ShaderBin, DEBUG};
 use crate::hw_runner::{Runner, CB0};
 use crate::ir::*;
+use crate::sm20::ShaderModel20;
+use crate::sm32::ShaderModel32;
 use crate::sm50::ShaderModel50;
 use crate::sm70::ShaderModel70;
 
@@ -36,6 +38,10 @@ impl RunSingleton {
                 Box::new(ShaderModel70::new(sm_nr))
             } else if sm_nr >= 50 {
                 Box::new(ShaderModel50::new(sm_nr))
+            } else if sm_nr >= 32 {
+                Box::new(ShaderModel32::new(sm_nr))
+            } else if sm_nr >= 20 {
+                Box::new(ShaderModel20::new(sm_nr))
             } else {
                 panic!("Unsupported shader model");
             };
@@ -198,9 +204,15 @@ impl<'a> TestShaderBuilder<'a> {
             smem_size: 0,
         };
         let info = ShaderInfo {
+            max_warps_per_sm: 0,
             num_gprs: 0,
             num_control_barriers: 0,
             num_instrs: 0,
+            num_static_cycles: 0,
+            num_spills_to_mem: 0,
+            num_fills_from_mem: 0,
+            num_spills_to_reg: 0,
+            num_fills_from_reg: 0,
             slm_size: 0,
             max_crs_depth: 0,
             uses_global_mem: true,
@@ -319,11 +331,10 @@ pub fn test_foldable_op_with(
                 let data = b.ld_test_data(comps * 4, MemType::B32);
                 comps += 1;
 
-                let bit = b.lop2(LogicOp2::And, data.into(), 1.into());
                 let pred = b.isetp(
                     IntCmpType::U32,
                     IntCmpOp::Ne,
-                    bit.into(),
+                    data.into(),
                     0.into(),
                 );
                 src.src_ref = pred.into();
@@ -333,13 +344,12 @@ pub fn test_foldable_op_with(
                 let data = b.ld_test_data(comps * 4, MemType::B32);
                 comps += 1;
 
-                let bit = b.lop2(LogicOp2::And, data.into(), 1.into());
                 let dst = b.alloc_ssa(RegFile::GPR, 1);
                 let carry = b.alloc_ssa(RegFile::Carry, 1);
                 b.push_op(OpIAdd2 {
                     dst: dst.into(),
                     carry_out: carry.into(),
-                    srcs: [u32::MAX.into(), bit.into()],
+                    srcs: [u32::MAX.into(), data.into()],
                 });
                 src.src_ref = carry.into();
                 fold_src.push(FoldData::Carry(false));
@@ -419,8 +429,14 @@ pub fn test_foldable_op_with(
                 panic!("Should be an ssa value");
             };
 
-            for _ in 0..vec.comps() {
-                data.push(rand_u32(i));
+            if matches!(src_types[i], SrcType::Pred | SrcType::Carry) {
+                for _ in 0..vec.comps() {
+                    data.push(rand_u32(i) & 1);
+                }
+            } else {
+                for _ in 0..vec.comps() {
+                    data.push(rand_u32(i));
+                }
             }
         }
         for _ in 0..dst_comps {
@@ -670,6 +686,8 @@ fn test_op_iadd3x() {
 fn test_op_isetp() {
     let set_ops = [PredSetOp::And, PredSetOp::Or, PredSetOp::Xor];
     let cmp_ops = [
+        IntCmpOp::False,
+        IntCmpOp::True,
         IntCmpOp::Eq,
         IntCmpOp::Ne,
         IntCmpOp::Lt,
@@ -722,6 +740,122 @@ fn test_op_isetp() {
                 x
             }
         });
+    }
+}
+
+#[test]
+fn test_op_lea() {
+    if RunSingleton::get().sm.sm() >= 70 {
+        let src_mods = [
+            (SrcMod::None, SrcMod::None),
+            (SrcMod::INeg, SrcMod::None),
+            (SrcMod::None, SrcMod::INeg),
+        ];
+
+        for (intermediate_mod, b_mod) in src_mods {
+            for shift in 0..32 {
+                for dst_high in [false, true] {
+                    let mut op = OpLea {
+                        dst: Dst::None,
+                        overflow: Dst::None,
+                        a: 0.into(),
+                        b: 0.into(),
+                        a_high: 0.into(),
+                        shift,
+                        dst_high,
+                        intermediate_mod,
+                    };
+                    op.b.src_mod = b_mod;
+
+                    test_foldable_op(op);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_op_leax() {
+    if RunSingleton::get().sm.sm() >= 70 {
+        let src_mods = [
+            (SrcMod::None, SrcMod::None),
+            (SrcMod::BNot, SrcMod::None),
+            (SrcMod::None, SrcMod::BNot),
+        ];
+
+        for (intermediate_mod, b_mod) in src_mods {
+            for shift in 0..32 {
+                for dst_high in [false, true] {
+                    let mut op = OpLeaX {
+                        dst: Dst::None,
+                        overflow: Dst::None,
+                        a: 0.into(),
+                        b: 0.into(),
+                        a_high: 0.into(),
+                        carry: 0.into(),
+                        shift,
+                        dst_high,
+                        intermediate_mod,
+                    };
+                    op.b.src_mod = b_mod;
+
+                    test_foldable_op(op);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_lea64() {
+    let run = RunSingleton::get();
+    if run.sm.sm() < 70 {
+        return;
+    }
+
+    let invocations = 100;
+
+    for shift in 0..64 {
+        let mut b = TestShaderBuilder::new(run.sm.as_ref());
+
+        let x = Src::from([
+            b.ld_test_data(0, MemType::B32)[0],
+            b.ld_test_data(4, MemType::B32)[0],
+        ]);
+
+        let y = Src::from([
+            b.ld_test_data(8, MemType::B32)[0],
+            b.ld_test_data(12, MemType::B32)[0],
+        ]);
+
+        let dst = b.lea64(x, y, shift);
+        b.st_test_data(16, MemType::B32, dst[0].into());
+        b.st_test_data(20, MemType::B32, dst[1].into());
+
+        let bin = b.compile();
+
+        let mut a = Acorn::new();
+        let mut data = Vec::new();
+        for _ in 0..invocations {
+            data.push([
+                get_iadd_int(&mut a),
+                get_iadd_int(&mut a),
+                get_iadd_int(&mut a),
+                get_iadd_int(&mut a),
+                0,
+                0,
+            ]);
+        }
+
+        run.run.run(&bin, &mut data).unwrap();
+
+        for d in &data {
+            let x = u64::from(d[0]) | (u64::from(d[1]) << 32);
+            let y = u64::from(d[2]) | (u64::from(d[3]) << 32);
+            let dst = (x << shift).wrapping_add(y);
+            assert_eq!(d[4], dst as u32);
+            assert_eq!(d[5], (dst >> 32) as u32);
+        }
     }
 }
 
@@ -846,6 +980,74 @@ fn test_op_psetp() {
             op.srcs[2].src_mod = src_mods[(i >> 2) & 1];
 
             test_foldable_op(op);
+        }
+    }
+}
+
+#[test]
+fn test_plop2() {
+    let run = RunSingleton::get();
+    let invocations = 100;
+
+    let logic_ops =
+        [LogicOp2::And, LogicOp2::Or, LogicOp2::Xor, LogicOp2::PassB];
+    let mods = [
+        (SrcMod::None, SrcMod::None),
+        (SrcMod::BNot, SrcMod::None),
+        (SrcMod::None, SrcMod::BNot),
+        (SrcMod::BNot, SrcMod::BNot),
+    ];
+
+    for op in logic_ops {
+        for (x_mod, y_mod) in mods {
+            let mut b = TestShaderBuilder::new(run.sm.as_ref());
+
+            let x = b.ld_test_data(0, MemType::B32)[0];
+            let y = b.ld_test_data(4, MemType::B32)[0];
+
+            let x = b.isetp(IntCmpType::U32, IntCmpOp::Ne, x.into(), 0.into());
+            let y = b.isetp(IntCmpType::U32, IntCmpOp::Ne, y.into(), 0.into());
+
+            let mut x = Src::from(x);
+            x.src_mod = x_mod;
+            let mut y = Src::from(y);
+            y.src_mod = y_mod;
+
+            let res = b.lop2(op, x, y);
+
+            let res = b.sel(res.into(), 1.into(), 0.into());
+            b.st_test_data(8, MemType::B32, res.into());
+
+            let bin = b.compile();
+
+            let mut a = Acorn::new();
+            let mut data = Vec::new();
+            for _ in 0..invocations {
+                data.push([a.get_uint(1) as u32, a.get_uint(1) as u32, 0_u32]);
+            }
+
+            run.run.run(&bin, &mut data).unwrap();
+
+            for d in &data {
+                let mut x = d[0] != 0;
+                let mut y = d[1] != 0;
+                if x_mod.is_bnot() {
+                    x = !x;
+                }
+                if y_mod.is_bnot() {
+                    y = !y;
+                }
+
+                let res = match op {
+                    LogicOp2::And => x & y,
+                    LogicOp2::Or => x | y,
+                    LogicOp2::Xor => x ^ y,
+                    LogicOp2::PassB => y,
+                };
+                let res = if res { 1 } else { 0 };
+
+                assert_eq!(d[2], res);
+            }
         }
     }
 }
@@ -1017,6 +1219,8 @@ fn test_isetp64() {
                 let x = x as i64;
                 let y = y as i64;
                 match cmp_op {
+                    IntCmpOp::False => false,
+                    IntCmpOp::True => true,
                     IntCmpOp::Eq => x == y,
                     IntCmpOp::Ne => x != y,
                     IntCmpOp::Lt => x < y,
@@ -1026,6 +1230,8 @@ fn test_isetp64() {
                 }
             } else {
                 match cmp_op {
+                    IntCmpOp::False => false,
+                    IntCmpOp::True => true,
                     IntCmpOp::Eq => x == y,
                     IntCmpOp::Ne => x != y,
                     IntCmpOp::Lt => x < y,
@@ -1119,6 +1325,10 @@ fn test_shr64() {
 #[test]
 fn test_f2fp_pack_ab() {
     let run = RunSingleton::get();
+    if run.sm.sm() < 70 {
+        return;
+    }
+
     let mut b = TestShaderBuilder::new(run.sm.as_ref());
 
     let srcs = SSARef::from([

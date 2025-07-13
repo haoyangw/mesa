@@ -34,7 +34,9 @@
 const nir_shader_compiler_options *
 GENX(pan_shader_get_compiler_options)(void)
 {
-#if PAN_ARCH >= 9
+#if PAN_ARCH >= 11
+   return &bifrost_nir_options_v11;
+#elif PAN_ARCH >= 9
    return &bifrost_nir_options_v9;
 #elif PAN_ARCH >= 6
    return &bifrost_nir_options_v6;
@@ -180,7 +182,7 @@ GENX(pan_shader_compile)(nir_shader *s, struct panfrost_compile_inputs *inputs,
       /* Requires the same hardware guarantees, so grouped as one bit
        * in the hardware.
        */
-      info->contains_barrier |= s->info.fs.needs_quad_helper_invocations;
+      info->contains_barrier |= s->info.fs.needs_coarse_quad_helper_invocations;
 
       info->fs.reads_frag_coord =
          (s->info.inputs_read & (1 << VARYING_SLOT_POS)) ||
@@ -212,6 +214,17 @@ GENX(pan_shader_compile)(nir_shader *s, struct panfrost_compile_inputs *inputs,
    unsigned execution_mode = s->info.float_controls_execution_mode;
    info->ftz_fp16 = nir_is_denorm_flush_to_zero(execution_mode, 16);
    info->ftz_fp32 = nir_is_denorm_flush_to_zero(execution_mode, 32);
+
+#if PAN_ARCH >= 9
+   /* Valhall hardware doesn't have a "flush FP16, preserve FP32" mode, and we
+    * don't advertise independent FP16/FP32 denorm modes in panvk, but it's
+    * still possible to have shaders that don't specify any denorm mode for
+    * FP32. In that case, default to flush FP32. */
+   if (info->ftz_fp16 && !info->ftz_fp32) {
+      assert(!nir_is_denorm_preserve(execution_mode, 32));
+      info->ftz_fp32 = true;
+   }
+#endif
 
 #if PAN_ARCH >= 6
    /* This is "redundant" information, but is needed in a draw-time hot path */

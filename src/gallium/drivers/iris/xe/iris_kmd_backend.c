@@ -39,11 +39,13 @@ static uint32_t
 xe_gem_create(struct iris_bufmgr *bufmgr,
               const struct intel_memory_class_instance **regions,
               uint16_t regions_count, uint64_t size,
-              enum iris_heap heap_flags, unsigned alloc_flags)
+              enum iris_heap heap_flags, enum bo_alloc_flags alloc_flags)
 {
-   /* Xe still don't have support for protected content */
-   if (alloc_flags & BO_ALLOC_PROTECTED)
-      return -EINVAL;
+   struct drm_xe_ext_set_property pxp_ext = {
+      .base.name = DRM_XE_GEM_CREATE_EXTENSION_SET_PROPERTY,
+      .property = DRM_XE_GEM_CREATE_SET_PROPERTY_PXP_TYPE,
+      .value = DRM_XE_PXP_TYPE_HWDRM,
+   };
 
    uint32_t vm_id = iris_bufmgr_get_global_vm_id(bufmgr);
    vm_id = alloc_flags & BO_ALLOC_SHARED ? 0 : vm_id;
@@ -82,6 +84,9 @@ xe_gem_create(struct iris_bufmgr *bufmgr,
       gem_create.cpu_caching = DRM_XE_GEM_CPU_CACHING_WC;
    }
 
+   if (alloc_flags & BO_ALLOC_PROTECTED)
+      gem_create.extensions = (uintptr_t)&pxp_ext;
+
    if (intel_ioctl(iris_bufmgr_get_fd(bufmgr), DRM_IOCTL_XE_GEM_CREATE,
                    &gem_create))
       return 0;
@@ -104,22 +109,23 @@ xe_gem_mmap(struct iris_bufmgr *bufmgr, struct iris_bo *bo)
 }
 
 static inline int
-xe_gem_vm_bind_op(struct iris_bo *bo, uint32_t op)
+xe_gem_vm_bind_op(struct iris_bo *bo, uint32_t op, enum bo_alloc_flags iris_flags)
 {
    struct iris_bufmgr *bufmgr = bo->bufmgr;
    struct intel_bind_timeline *bind_timeline = iris_bufmgr_get_bind_timeline(bufmgr);
    const struct intel_device_info *devinfo = iris_bufmgr_get_device_info(bufmgr);
    uint32_t handle = op == DRM_XE_VM_BIND_OP_UNMAP ? 0 : bo->gem_handle;
    struct drm_xe_sync xe_sync = {
-      .handle = intel_bind_timeline_get_syncobj(bind_timeline),
       .type = DRM_XE_SYNC_TYPE_TIMELINE_SYNCOBJ,
       .flags = DRM_XE_SYNC_FLAG_SIGNAL,
+      .addr = 0, /* init union to 0 before setting .handle */
    };
    uint64_t range, obj_offset = 0;
    uint32_t flags = 0;
    int ret, fd;
 
    fd = iris_bufmgr_get_fd(bufmgr);
+   xe_sync.handle = intel_bind_timeline_get_syncobj(bind_timeline);
 
    if (iris_bo_is_imported(bo))
       range = bo->size;
@@ -135,6 +141,8 @@ xe_gem_vm_bind_op(struct iris_bo *bo, uint32_t op)
 
    if (bo->real.capture)
       flags |= DRM_XE_VM_BIND_FLAG_DUMPABLE;
+   if (iris_flags & BO_ALLOC_PROTECTED)
+      flags |= DRM_XE_VM_BIND_FLAG_CHECK_PXP;
 
    struct drm_xe_vm_bind args = {
       .vm_id = iris_bufmgr_get_global_vm_id(bufmgr),
@@ -161,15 +169,15 @@ xe_gem_vm_bind_op(struct iris_bo *bo, uint32_t op)
 }
 
 static bool
-xe_gem_vm_bind(struct iris_bo *bo)
+xe_gem_vm_bind(struct iris_bo *bo, enum bo_alloc_flags flags)
 {
-   return xe_gem_vm_bind_op(bo, DRM_XE_VM_BIND_OP_MAP) == 0;
+   return xe_gem_vm_bind_op(bo, DRM_XE_VM_BIND_OP_MAP, flags) == 0;
 }
 
 static bool
 xe_gem_vm_unbind(struct iris_bo *bo)
 {
-   return xe_gem_vm_bind_op(bo, DRM_XE_VM_BIND_OP_UNMAP) == 0;
+   return xe_gem_vm_bind_op(bo, DRM_XE_VM_BIND_OP_UNMAP, 0) == 0;
 }
 
 static bool

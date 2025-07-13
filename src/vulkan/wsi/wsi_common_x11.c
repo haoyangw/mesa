@@ -783,7 +783,8 @@ x11_surface_get_capabilities2(VkIcdSurfaceBase *icd_surface,
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR: {
          VkSurfaceProtectedCapabilitiesKHR *protected = (void *)ext;
-         protected->supportsProtected = VK_FALSE;
+         protected->supportsProtected =
+            wsi_device->supports_protected[VK_ICD_WSI_PLATFORM_XCB];
          break;
       }
 
@@ -1744,11 +1745,11 @@ x11_set_present_mode(struct wsi_swapchain *wsi_chain,
  * image has been released by the X server to be used again by the consumer.
  */
 static VkResult
-x11_acquire_next_image(struct wsi_swapchain *anv_chain,
+x11_acquire_next_image(struct wsi_swapchain *wsi_chain,
                        const VkAcquireNextImageInfoKHR *info,
                        uint32_t *image_index)
 {
-   struct x11_swapchain *chain = (struct x11_swapchain *)anv_chain;
+   struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
    uint64_t timeout = info->timeout;
 
    /* If the swapchain is in an error state, don't go any further. */
@@ -1796,12 +1797,12 @@ x11_acquire_next_image(struct wsi_swapchain *anv_chain,
  * presentation but directly asks the X server to show it.
  */
 static VkResult
-x11_queue_present(struct wsi_swapchain *anv_chain,
+x11_queue_present(struct wsi_swapchain *wsi_chain,
                   uint32_t image_index,
                   uint64_t present_id,
                   const VkPresentRegionKHR *damage)
 {
-   struct x11_swapchain *chain = (struct x11_swapchain *)anv_chain;
+   struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
    xcb_xfixes_region_t update_area = 0;
 
    /* If the swapchain is in an error state, don't go any further. */
@@ -2169,7 +2170,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    if (chain->base.image_info.explicit_sync) {
       for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
          image->dri3_syncobj[i] = xcb_generate_id(chain->conn);
-         int fd = dup(image->base.explicit_sync[i].fd);
+         int fd = os_dupfd_cloexec(image->base.explicit_sync[i].fd);
          if (fd < 0)
             goto fail_image;
 
@@ -2401,10 +2402,10 @@ wsi_x11_swapchain_query_dri3_modifiers_changed(struct x11_swapchain *chain)
 }
 #endif
 static VkResult
-x11_swapchain_destroy(struct wsi_swapchain *anv_chain,
+x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
                       const VkAllocationCallbacks *pAllocator)
 {
-   struct x11_swapchain *chain = (struct x11_swapchain *)anv_chain;
+   struct x11_swapchain *chain = (struct x11_swapchain *)wsi_chain;
 
    mtx_lock(&chain->thread_state_lock);
    chain->status = VK_ERROR_OUT_OF_DATE_KHR;

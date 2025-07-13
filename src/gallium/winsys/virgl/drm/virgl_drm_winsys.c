@@ -49,10 +49,6 @@
 #include "virgl_drm_winsys.h"
 #include "virgl_drm_public.h"
 
-// Delete local definitions when virglrenderer_hw.h becomes public
-#define VIRGL_DRM_CAPSET_VIRGL  1
-#define VIRGL_DRM_CAPSET_VIRGL2 2
-
 #define VIRGL_DRM_VERSION(major, minor) ((major) << 16 | (minor))
 #define VIRGL_DRM_VERSION_FENCE_FD      VIRGL_DRM_VERSION(0, 1)
 
@@ -75,8 +71,6 @@ static inline bool can_cache_resource(uint32_t bind)
 static void virgl_hw_res_destroy(struct virgl_drm_winsys *qdws,
                                  struct virgl_hw_res *res)
 {
-      struct drm_gem_close args;
-
       mtx_lock(&qdws->bo_handles_mutex);
 
       /* We intentionally avoid taking the lock in
@@ -96,9 +90,8 @@ static void virgl_hw_res_destroy(struct virgl_drm_winsys *qdws,
       if (res->ptr)
          os_munmap(res->ptr, res->size);
 
-      memset(&args, 0, sizeof(args));
-      args.handle = res->bo_handle;
-      drmIoctl(qdws->fd, DRM_IOCTL_GEM_CLOSE, &args);
+      drmCloseBufferHandle(qdws->fd, res->bo_handle);
+
       /* We need to unlock the access to bo_handles after closing the GEM to
        * avoid a race condition where another thread would not find the
        * bo_handle leading to a call of DRM_IOCTL_GEM_OPEN which will return
@@ -564,6 +557,8 @@ virgl_drm_winsys_resource_create_handle(struct virgl_winsys *qws,
    info_arg.bo_handle = res->bo_handle;
 
    if (drmIoctl(qdws->fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &info_arg)) {
+      drmCloseBufferHandle(qdws->fd, res->bo_handle);
+
       /* close */
       FREE(res);
       res = NULL;
@@ -1169,10 +1164,10 @@ static int virgl_init_context(int drmFD)
    uint64_t supports_capset_virgl, supports_capset_virgl2;
    supports_capset_virgl = supports_capset_virgl2 = 0;
 
-   supports_capset_virgl = ((1 << VIRGL_DRM_CAPSET_VIRGL) &
+   supports_capset_virgl = ((1 << VIRTGPU_DRM_CAPSET_VIRGL) &
                              params[param_supported_capset_ids].value);
 
-   supports_capset_virgl2 = ((1 << VIRGL_DRM_CAPSET_VIRGL2) &
+   supports_capset_virgl2 = ((1 << VIRTGPU_DRM_CAPSET_VIRGL2) &
                               params[param_supported_capset_ids].value);
 
    if (!supports_capset_virgl && !supports_capset_virgl2) {
@@ -1182,8 +1177,8 @@ static int virgl_init_context(int drmFD)
 
    ctx_set_param.param = VIRTGPU_CONTEXT_PARAM_CAPSET_ID;
    ctx_set_param.value = (supports_capset_virgl2) ?
-                         VIRGL_DRM_CAPSET_VIRGL2 :
-                         VIRGL_DRM_CAPSET_VIRGL;
+                         VIRTGPU_DRM_CAPSET_VIRGL2 :
+                         VIRTGPU_DRM_CAPSET_VIRGL;
 
    init.ctx_set_params = (unsigned long)(void *)&ctx_set_param;
    init.num_params = 1;

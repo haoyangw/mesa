@@ -7,26 +7,10 @@
 #include <assert.h>
 #include <stdbool.h>
 
-#include "nir/nir_builder.h"
+#include "nir/radv_meta_nir.h"
 #include "radv_entrypoints.h"
 #include "radv_meta.h"
-#include "sid.h"
 #include "vk_format.h"
-
-static nir_shader *
-build_nir_fs(struct radv_device *dev)
-{
-   const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_variable *f_color;
-
-   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs");
-
-   f_color = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_color");
-   f_color->data.location = FRAG_RESULT_DATA0;
-   nir_store_var(&b, f_color, nir_imm_vec4(&b, 0.0, 0.0, 0.0, 1.0), 0xf);
-
-   return b.shader;
-}
 
 struct radv_resolve_key {
    enum radv_meta_object_key_type type;
@@ -54,8 +38,8 @@ get_pipeline(struct radv_device *device, unsigned fs_key, VkPipeline *pipeline_o
       return VK_SUCCESS;
    }
 
-   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices(device);
-   nir_shader *fs_module = build_nir_fs(device);
+   nir_shader *vs_module = radv_meta_nir_build_vs_generate_vertices(device);
+   nir_shader *fs_module = radv_meta_nir_build_resolve_fs(device);
 
    const VkGraphicsPipelineCreateInfoRADV radv_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO_RADV,
@@ -423,13 +407,8 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
    VkImageLayout src_image_layout = pResolveImageInfo->srcImageLayout;
    VkImageLayout dst_image_layout = pResolveImageInfo->dstImageLayout;
    enum radv_resolve_method resolve_method = pdev->info.gfx_level >= GFX11 ? RESOLVE_FRAGMENT : RESOLVE_HW;
-   bool old_predicating;
 
-   /* VK_EXT_conditional_rendering says that resolve commands should not be affected by conditional
-    * rendering.
-    */
-   old_predicating = cmd_buffer->state.predicating;
-   cmd_buffer->state.predicating = false;
+   radv_suspend_conditional_rendering(cmd_buffer);
 
    /* we can use the hw resolve only for single full resolves */
    if (pResolveImageInfo->regionCount == 1) {
@@ -456,8 +435,7 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
       resolve_image(cmd_buffer, src_image, src_image_layout, dst_image, dst_image_layout, region, resolve_method);
    }
 
-   /* Restore conditional rendering. */
-   cmd_buffer->state.predicating = old_predicating;
+   radv_resume_conditional_rendering(cmd_buffer);
 }
 
 static void
@@ -603,7 +581,7 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer)
        * after subpass resolves.
        */
       cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB;
-      if (radv_image_has_htile(dst_iview->image))
+      if (radv_htile_enabled(dst_iview->image, dst_iview->vk.base_mip_level))
          cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
    }
 

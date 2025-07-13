@@ -14,12 +14,14 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
-#include "nir.h"
+#include "nir_tcs_info.h"
 #include "radv_constants.h"
 #include "radv_shader_args.h"
+#include "util/set.h"
 
 struct radv_device;
 struct nir_shader;
+typedef struct nir_shader nir_shader;
 struct radv_shader_layout;
 struct radv_shader_stage_key;
 enum radv_pipeline_type;
@@ -51,7 +53,6 @@ struct radv_vs_output_info {
 };
 
 struct radv_streamout_info {
-   uint16_t num_outputs;
    uint16_t strides[MAX_SO_BUFFERS];
    uint32_t enabled_stream_buffers_mask;
 };
@@ -126,6 +127,7 @@ struct radv_shader_info {
       bool use_per_attribute_vb_descs;
       uint32_t vb_desc_usage_mask;
       uint32_t input_slot_usage_mask;
+      uint8_t num_attributes;
       bool has_prolog;
       bool dynamic_inputs;
       bool dynamic_num_verts_per_prim;
@@ -232,6 +234,8 @@ struct radv_shader_info {
       bool has_query; /* Task shader only */
 
       bool regalloc_hang_bug;
+
+      unsigned derivative_group : 2;
    } cs;
    struct {
       uint64_t tes_inputs_read;
@@ -293,6 +297,7 @@ struct radv_shader_info {
       struct {
          uint32_t spi_shader_gs_meshlet_dim;
          uint32_t spi_shader_gs_meshlet_exp_alloc;
+         uint32_t spi_shader_gs_meshlet_ctrl; /* GFX12+ */
       } ms;
 
       struct {

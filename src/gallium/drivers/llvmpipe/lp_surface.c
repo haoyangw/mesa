@@ -191,7 +191,12 @@ lp_blit(struct pipe_context *pipe,
    util_blitter_save_render_condition(lp->blitter, lp->render_cond_query,
                                       lp->render_cond_cond,
                                       lp->render_cond_mode);
+
+   void *render_cond_buffer = lp->render_cond_buffer;
+   if (!blit_info->render_condition_enable)
+      lp->render_cond_buffer = NULL;
    util_blitter_blit(lp->blitter, &info, NULL);
+   lp->render_cond_buffer = render_cond_buffer;
 }
 
 
@@ -226,18 +231,10 @@ llvmpipe_create_surface(struct pipe_context *pipe,
       if (llvmpipe_resource_is_texture(pt)) {
          assert(surf_tmpl->u.tex.level <= pt->last_level);
          assert(surf_tmpl->u.tex.first_layer <= surf_tmpl->u.tex.last_layer);
-         ps->width = u_minify(pt->width0, surf_tmpl->u.tex.level);
-         ps->height = u_minify(pt->height0, surf_tmpl->u.tex.level);
          ps->u.tex.level = surf_tmpl->u.tex.level;
          ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
          ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
       } else {
-         /* setting width as number of elements should get us correct
-          * renderbuffer width
-          */
-         ps->width = surf_tmpl->u.buf.last_element
-                   - surf_tmpl->u.buf.first_element + 1;
-         ps->height = pt->height0;
          ps->u.buf.first_element = surf_tmpl->u.buf.first_element;
          ps->u.buf.last_element = surf_tmpl->u.buf.last_element;
          assert(ps->u.buf.first_element <= ps->u.buf.last_element);

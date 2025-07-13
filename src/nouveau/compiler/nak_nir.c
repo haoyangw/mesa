@@ -18,7 +18,7 @@
    this_progress;                                        \
 })
 
-#define OPT_V(nir, pass, ...) NIR_PASS_V(nir, pass, ##__VA_ARGS__)
+#define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
 bool
 nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
@@ -136,7 +136,11 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
       OPT(nir, nir_opt_dce);
       OPT(nir, nir_opt_cse);
 
-      OPT(nir, nir_opt_peephole_select, 0, false, false);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      OPT(nir, nir_opt_peephole_select, &peephole_select_options);
       OPT(nir, nir_opt_intrinsics);
       OPT(nir, nir_opt_idiv_const, 32);
       OPT(nir, nir_opt_algebraic);
@@ -160,7 +164,6 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
          OPT(nir, nir_opt_dce);
       }
       OPT(nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      OPT(nir, nir_opt_conditional_discard);
       if (nir->options->max_unroll_iterations != 0) {
          OPT(nir, nir_opt_loop_unroll);
       }
@@ -306,7 +309,7 @@ nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak)
       .lower_txd_clamp = true,
       .lower_txd_shadow = true,
       .lower_txp = ~0,
-      /* TODO: More lowering */
+      .lower_invalid_implicit_lod = true,
    };
    OPT(nir, nir_lower_tex, &tex_options);
    OPT(nir, nir_normalize_cubemap_coords);
@@ -792,7 +795,7 @@ nak_nir_remove_barriers(nir_shader *nir)
    nir->info.uses_control_barrier = false;
 
    return nir_shader_intrinsics_pass(nir, nak_nir_remove_barrier_intrin,
-                                     nir_metadata_control_flow,
+                                     nir_metadata_control_flow | nir_metadata_divergence,
                                      NULL);
 }
 
@@ -903,6 +906,30 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
    return glsl_count_vec4_slots(type, false, bindless);
 }
 
+static bool
+atomic_supported(const nir_instr *instr, const void *data)
+{
+   /* Shared atomics don't support 64-bit arithmetic */
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   return !(intr->intrinsic == nir_intrinsic_shared_atomic &&
+            intr->def.bit_size == 64);
+}
+
+static unsigned
+split_conversions_cb(const nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   unsigned src_bit_size = nir_src_bit_size(alu->src[0].src);
+   unsigned dst_bit_size = alu->def.bit_size;
+
+   /* We can't cross the 64-bit boundary in one conversion */
+   if ((src_bit_size <= 32 && dst_bit_size <= 32) ||
+       (src_bit_size >= 32 && dst_bit_size >= 32))
+      return 0;
+
+   return 32;
+}
+
 void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
@@ -927,6 +954,7 @@ nak_postprocess_nir(nir_shader *nir,
       .lower_rotate_to_shuffle = true
    };
    OPT(nir, nir_lower_subgroups, &subgroups_options);
+   OPT(nir, nir_lower_atomics, atomic_supported);
    OPT(nir, nak_nir_lower_scan_reduce);
 
    if (nir_shader_has_local_variables(nir)) {
@@ -959,6 +987,10 @@ nak_postprocess_nir(nir_shader *nir,
 
    nak_optimize_nir(nir, nak);
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      nir_divergence_analysis(nir);
+      OPT(nir, nir_opt_tex_skip_helpers, true);
+   }
    OPT(nir, nak_nir_lower_tex, nak);
    OPT(nir, nir_lower_idiv, NULL);
 
@@ -1042,24 +1074,39 @@ nak_postprocess_nir(nir_shader *nir,
       }
    } while (progress);
 
-   if (nak->sm < 70)
-      OPT(nir, nak_nir_split_64bit_conversions);
+   if (nak->sm < 70) {
+      const nir_split_conversions_options split_conv_opts = {
+         .callback = split_conversions_cb,
+         .has_convert_alu_types = true,
+      };
+      OPT(nir, nir_split_conversions, &split_conv_opts);
+   }
+
+   /* Re-materialize load_const instructions in the blocks that use them.
+    * This is both a register pressure optimization and a ensures correctness
+    * in the presence of all of the control flow modifications we're about to
+    * do.  Without this, we can't rely on anything to be constant in NIR to
+    * NAK translation.
+    */
+   if (OPT(nir, nak_nir_rematerialize_load_const))
+      OPT(nir, nir_opt_dce);
 
    bool lcssa_progress = nir_convert_to_lcssa(nir, false, false);
-   nir_divergence_analysis(nir);
 
-   if (nak->sm >= 75) {
+   if (nak->sm >= 73) {
       if (lcssa_progress) {
          OPT(nir, nak_nir_mark_lcssa_invariants);
       }
       if (OPT(nir, nak_nir_lower_non_uniform_ldcx)) {
          OPT(nir, nir_copy_prop);
          OPT(nir, nir_opt_dce);
-         nir_divergence_analysis(nir);
       }
    }
 
    OPT(nir, nak_nir_remove_barriers);
+
+   /* Call divergence analysis regardless of sm version. */
+   nir_divergence_analysis(nir);
 
    if (nak->sm >= 70) {
       if (nak_should_print_nir()) {
@@ -1077,6 +1124,9 @@ nak_postprocess_nir(nir_shader *nir,
       if (func->impl) {
          nir_index_blocks(func->impl);
          nir_index_ssa_defs(func->impl);
+
+         /* Ensure that divergence information is correct. */
+         assert(func->impl->valid_metadata & nir_metadata_divergence);
       }
    }
 
@@ -1088,13 +1138,17 @@ nak_postprocess_nir(nir_shader *nir,
 }
 
 static bool
-scalar_is_imm_int(nir_scalar x, unsigned bits)
+scalar_is_imm_int(nir_scalar x, unsigned bits, bool is_signed)
 {
    if (!nir_scalar_is_const(x))
       return false;
 
-   int64_t imm = nir_scalar_as_int(x);
-   return u_intN_min(bits) <= imm && imm <= u_intN_max(bits);
+   if (is_signed) {
+      int64_t imm = nir_scalar_as_int(x);
+      return u_intN_min(bits) <= imm && imm <= u_intN_max(bits);
+   } else {
+      return nir_scalar_as_uint(x) < u_uintN_max(bits);
+   }
 }
 
 struct nak_io_addr_offset
@@ -1104,7 +1158,9 @@ nak_get_io_addr_offset(nir_def *addr, uint8_t imm_bits)
       .def = addr,
       .comp = 0,
    };
-   if (scalar_is_imm_int(addr_s, imm_bits)) {
+
+   /* If the entire address is constant, it's an unsigned immediate */
+   if (scalar_is_imm_int(addr_s, imm_bits, false)) {
       /* Base is a dumb name for this.  It should be offset */
       return (struct nak_io_addr_offset) {
          .offset = nir_scalar_as_int(addr_s),
@@ -1122,7 +1178,9 @@ nak_get_io_addr_offset(nir_def *addr, uint8_t imm_bits)
    for (unsigned i = 0; i < 2; i++) {
       nir_scalar off_s = nir_scalar_chase_alu_src(addr_s, i);
       off_s = nir_scalar_chase_movs(off_s);
-      if (scalar_is_imm_int(off_s, imm_bits)) {
+
+      /* If it's imm+indirect then the immediate is signed */
+      if (scalar_is_imm_int(off_s, imm_bits, true)) {
          return (struct nak_io_addr_offset) {
             .base = nir_scalar_chase_alu_src(addr_s, 1 - i),
             .offset = nir_scalar_as_int(off_s),

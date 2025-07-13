@@ -1,5 +1,6 @@
 .lavapipe-rules:
   stage: software-renderer
+  timeout: 15m
   rules:
     - !reference [.test, rules]
     - if: $EXTERNAL_KERNEL_TAG != null
@@ -39,6 +40,8 @@
   extends:
     - .test-vk
     - .lavapipe-rules
+  tags:
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64
   variables:
     VK_DRIVER: lvp
     LVP_POISON_MEMORY: "1"

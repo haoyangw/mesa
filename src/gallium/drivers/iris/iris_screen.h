@@ -159,7 +159,6 @@ struct iris_vtable {
    void (*lost_genx_state)(struct iris_context *ice, struct iris_batch *batch);
    void (*disable_rhwo_optimization)(struct iris_batch *batch, bool disable);
 
-   const uint32_t *(*load_shader_lib_spv)(uint32_t *out_size);
    unsigned (*call_generation_shader)(struct iris_screen *screen, nir_builder *b);
 };
 
@@ -205,6 +204,8 @@ struct iris_screen {
       float lower_depth_range_rate;
       bool intel_enable_wa_14018912822;
       bool enable_tbimr;
+      bool enable_vf_distribution;
+      bool enable_te_distribution;
       unsigned generated_indirect_threshold;
    } driconf;
 

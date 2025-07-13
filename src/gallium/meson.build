@@ -229,10 +229,6 @@ if with_dri
   subdir('frontends/dri')
   subdir('targets/dri')
 endif
-if with_osmesa
-  subdir('frontends/osmesa')
-  subdir('targets/osmesa')
-endif
 if with_gallium_xa
   subdir('frontends/xa')
   subdir('targets/xa')
@@ -259,9 +255,6 @@ if with_platform_windows
     subdir('targets/wgl')
     subdir('targets/libgl-gdi')
   endif
-endif
-if with_tests
-  subdir('tests')
 endif
 if with_swrast_vk
   subdir('frontends/lavapipe')

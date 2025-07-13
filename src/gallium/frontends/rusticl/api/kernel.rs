@@ -343,7 +343,11 @@ fn create_kernels_in_program(
         }
         num_kernels += 1;
     }
-    num_kernels_ret.write_checked(num_kernels);
+
+    // SAFETY: Caller is responsible for providing a pointer valid for a write
+    // of `size_of::<cl_uint>()`.
+    unsafe { num_kernels_ret.write_checked(num_kernels) };
+
     Ok(())
 }
 
@@ -433,6 +437,20 @@ fn set_kernel_arg(
                     KernelArgType::Image | KernelArgType::RWImage | KernelArgType::Texture => {
                         let img: *const cl_mem = arg_value.cast();
                         let img = Image::arc_from_raw(*img)?;
+
+                        // CL_INVALID_ARG_VALUE if the argument is an image declared with the read_only
+                        // qualifier and arg_value refers to an image object created with cl_mem_flags
+                        // of CL_MEM_WRITE_ONLY or if the image argument is declared with the write_only
+                        // qualifier and arg_value refers to an image object created with cl_mem_flags
+                        // of CL_MEM_READ_ONLY.
+                        if arg.kind == KernelArgType::Texture
+                            && bit_check(img.flags, CL_MEM_WRITE_ONLY)
+                            || arg.kind == KernelArgType::Image
+                                && bit_check(img.flags, CL_MEM_READ_ONLY)
+                        {
+                            return Err(CL_INVALID_ARG_VALUE);
+                        }
+
                         KernelArgValue::Image(Arc::downgrade(&img))
                     }
                     KernelArgType::Sampler => {
@@ -448,7 +466,6 @@ fn set_kernel_arg(
     }
 
     //• CL_INVALID_DEVICE_QUEUE for an argument declared to be of type queue_t when the specified arg_value is not a valid device queue object. This error code is missing before version 2.0.
-    //• CL_INVALID_ARG_VALUE if the argument is an image declared with the read_only qualifier and arg_value refers to an image object created with cl_mem_flags of CL_MEM_WRITE_ONLY or if the image argument is declared with the write_only qualifier and arg_value refers to an image object created with cl_mem_flags of CL_MEM_READ_ONLY.
     //• CL_MAX_SIZE_RESTRICTION_EXCEEDED if the size in bytes of the memory object (if the argument is a memory object) or arg_size (if the argument is declared with local qualifier) exceeds a language- specified maximum size restriction for this argument, such as the MaxByteOffset SPIR-V decoration. This error code is missing before version 2.2.
 }
 
@@ -497,22 +514,29 @@ fn set_kernel_exec_info(
         return Err(CL_INVALID_OPERATION);
     }
 
-    // CL_INVALID_VALUE ... if param_value is NULL
-    if param_value.is_null() {
-        return Err(CL_INVALID_VALUE);
-    }
-
     // CL_INVALID_VALUE ... if the size specified by param_value_size is not valid.
     match param_name {
         CL_KERNEL_EXEC_INFO_SVM_PTRS | CL_KERNEL_EXEC_INFO_SVM_PTRS_ARM => {
-            // it's a list of pointers
-            if param_value_size % mem::size_of::<*const c_void>() != 0 {
-                return Err(CL_INVALID_VALUE);
+            // To specify that no SVM allocations will be accessed by a kernel other than those set
+            // as kernel arguments, specify an empty set by passing param_value_size equal to zero
+            // and param_value equal to NULL.
+            if !param_value.is_null() || param_value_size != 0 {
+                let _ = unsafe {
+                    cl_slice::from_raw_parts_bytes_len::<*const c_void>(
+                        param_value,
+                        param_value_size,
+                    )?
+                };
             }
         }
         CL_KERNEL_EXEC_INFO_SVM_FINE_GRAIN_SYSTEM
         | CL_KERNEL_EXEC_INFO_SVM_FINE_GRAIN_SYSTEM_ARM => {
-            if param_value_size != mem::size_of::<cl_bool>() {
+            let val = unsafe {
+                cl_slice::from_raw_parts_bytes_len::<cl_bool>(param_value, param_value_size)?
+            };
+
+            // we must explicitly check that we only got one element
+            if val.len() != 1 {
                 return Err(CL_INVALID_VALUE);
             }
         }
@@ -571,7 +595,7 @@ fn enqueue_ndrange_kernel(
     let device_bits = q.device.address_bits();
     let device_max = u64::MAX >> (u64::BITS - device_bits);
 
-    let mut threads = 0;
+    let mut threads = 1;
     for i in 0..work_dim as usize {
         let lws = local_work_size[i];
         let gws = global_work_size[i];

@@ -6,10 +6,8 @@
 #include <stdint.h>
 #include "util/half_float.h"
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
-
-using namespace brw;
 
 struct brw_reduction_info {
    brw_reg             identity;
@@ -251,9 +249,9 @@ brw_emit_scan(const brw_builder &bld, enum opcode opcode, const brw_reg &tmp,
 }
 
 static bool
-brw_lower_reduce(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_reduce(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    assert(inst->dst.type == inst->src[0].type);
    brw_reg dst = inst->dst;
@@ -298,14 +296,14 @@ brw_lower_reduce(fs_visitor &s, bblock_t *block, fs_inst *inst)
       bld.emit(SHADER_OPCODE_CLUSTER_BROADCAST, dst, scan,
                brw_imm_ud(cluster_size - 1), brw_imm_ud(cluster_size));
    }
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static bool
-brw_lower_scan(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_scan(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    assert(inst->dst.type == inst->src[0].type);
    brw_reg dst = inst->dst;
@@ -347,14 +345,14 @@ brw_lower_scan(fs_visitor &s, bblock_t *block, fs_inst *inst)
 
    bld.MOV(dst, scan);
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static brw_reg
 brw_fill_flag(const brw_builder &bld, unsigned v)
 {
-   const brw_builder ubld1 = bld.exec_all().group(1, 0);
+   const brw_builder ubld1 = bld.uniform();
    brw_reg flag = brw_flag_reg(0, 0);
 
    if (bld.shader->dispatch_width == 32) {
@@ -400,7 +398,7 @@ brw_lower_dispatch_width_vote(const brw_builder &bld, enum opcode opcode, brw_re
     * TODO: Check if we still need this for newer platforms.
     */
    const brw_builder ubld = devinfo->ver >= 20 ? bld.exec_all()
-                                               : bld.exec_all().group(1, 0);
+                                               : bld.uniform();
    brw_reg res1 = ubld.MOV(brw_imm_d(0));
 
    enum brw_predicate pred;
@@ -438,7 +436,7 @@ brw_lower_quad_vote_gfx9(const brw_builder &bld, enum opcode opcode, brw_reg dst
    const enum brw_predicate pred = any ? BRW_PREDICATE_ALIGN1_ANY4H
                                        : BRW_PREDICATE_ALIGN1_ALL4H;
 
-   fs_inst *mov = bld.MOV(retype(dst, BRW_TYPE_D), brw_imm_d(-1));
+   brw_inst *mov = bld.MOV(retype(dst, BRW_TYPE_D), brw_imm_d(-1));
    set_predicate(pred, mov);
 }
 
@@ -488,9 +486,9 @@ brw_lower_quad_vote_gfx20(const brw_builder &bld, enum opcode opcode, brw_reg ds
 }
 
 static bool
-brw_lower_vote(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_vote(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    brw_reg dst = inst->dst;
    brw_reg src = inst->src[0];
@@ -513,14 +511,14 @@ brw_lower_vote(fs_visitor &s, bblock_t *block, fs_inst *inst)
          brw_lower_quad_vote_gfx20(bld, inst->opcode, dst, src);
    }
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static bool
-brw_lower_ballot(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_ballot(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    brw_reg value = retype(inst->src[0], BRW_TYPE_UD);
    brw_reg dst = inst->dst;
@@ -543,14 +541,14 @@ brw_lower_ballot(fs_visitor &s, bblock_t *block, fs_inst *inst)
       xbld.MOV(dst, flag);
    }
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static bool
-brw_lower_quad_swap(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_quad_swap(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    assert(inst->dst.type == inst->src[0].type);
    brw_reg dst = inst->dst;
@@ -599,14 +597,14 @@ brw_lower_quad_swap(fs_visitor &s, bblock_t *block, fs_inst *inst)
    }
    }
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static bool
-brw_lower_read_from_live_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_read_from_live_channel(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    assert(inst->sources == 1);
    assert(inst->dst.type == inst->src[0].type);
@@ -615,14 +613,14 @@ brw_lower_read_from_live_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
 
    bld.MOV(dst, bld.emit_uniformize(value));
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 static bool
-brw_lower_read_from_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
+brw_lower_read_from_channel(brw_shader &s, brw_inst *inst)
 {
-   const brw_builder bld(&s, block, inst);
+   const brw_builder bld(inst);
 
    assert(inst->sources == 2);
    assert(inst->dst.type == inst->src[0].type);
@@ -648,46 +646,46 @@ brw_lower_read_from_channel(fs_visitor &s, bblock_t *block, fs_inst *inst)
       bld.MOV(dst, tmp);
    }
 
-   inst->remove(block);
+   inst->remove();
    return true;
 }
 
 bool
-brw_lower_subgroup_ops(fs_visitor &s)
+brw_lower_subgroup_ops(brw_shader &s)
 {
    bool progress = false;
 
-   foreach_block_and_inst_safe(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst_safe(block, brw_inst, inst, s.cfg) {
       switch (inst->opcode) {
       case SHADER_OPCODE_REDUCE:
-         progress |= brw_lower_reduce(s, block, inst);
+         progress |= brw_lower_reduce(s, inst);
          break;
 
       case SHADER_OPCODE_INCLUSIVE_SCAN:
       case SHADER_OPCODE_EXCLUSIVE_SCAN:
-         progress |= brw_lower_scan(s, block, inst);
+         progress |= brw_lower_scan(s, inst);
          break;
 
       case SHADER_OPCODE_VOTE_ANY:
       case SHADER_OPCODE_VOTE_ALL:
       case SHADER_OPCODE_VOTE_EQUAL:
-         progress |= brw_lower_vote(s, block, inst);
+         progress |= brw_lower_vote(s, inst);
          break;
 
       case SHADER_OPCODE_BALLOT:
-         progress |= brw_lower_ballot(s, block, inst);
+         progress |= brw_lower_ballot(s, inst);
          break;
 
       case SHADER_OPCODE_QUAD_SWAP:
-         progress |= brw_lower_quad_swap(s, block, inst);
+         progress |= brw_lower_quad_swap(s, inst);
          break;
 
       case SHADER_OPCODE_READ_FROM_LIVE_CHANNEL:
-         progress |= brw_lower_read_from_live_channel(s, block, inst);
+         progress |= brw_lower_read_from_live_channel(s, inst);
          break;
 
       case SHADER_OPCODE_READ_FROM_CHANNEL:
-         progress |= brw_lower_read_from_channel(s, block, inst);
+         progress |= brw_lower_read_from_channel(s, inst);
          break;
 
       default:
@@ -697,7 +695,8 @@ brw_lower_subgroup_ops(fs_visitor &s)
    }
 
    if (progress)
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                            BRW_DEPENDENCY_VARIABLES);
 
    return progress;
 }

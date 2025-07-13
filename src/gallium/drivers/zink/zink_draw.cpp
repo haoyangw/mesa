@@ -119,7 +119,6 @@ zink_bind_vertex_buffers(struct zink_context *ctx)
    VkBuffer buffers[PIPE_MAX_ATTRIBS];
    VkDeviceSize buffer_offsets[PIPE_MAX_ATTRIBS];
    struct zink_vertex_elements_state *elems = ctx->element_state;
-   struct zink_screen *screen = zink_screen(ctx->base.screen);
 
    for (unsigned i = 0; i < elems->hw_state.num_bindings; i++) {
       struct pipe_vertex_buffer *vb = ctx->vertex_buffers + elems->hw_state.binding_map[i];
@@ -140,17 +139,12 @@ zink_bind_vertex_buffers(struct zink_context *ctx)
        DYNAMIC_STATE != ZINK_DYNAMIC_VERTEX_INPUT) {
       if (elems->hw_state.num_bindings)
          VKCTX(CmdBindVertexBuffers2)(ctx->bs->cmdbuf, 0,
-                                             elems->hw_state.num_bindings,
-                                             buffers, buffer_offsets, NULL, elems->hw_state.b.strides);
+                                      elems->hw_state.num_bindings,
+                                      buffers, buffer_offsets, NULL, elems->hw_state.b.strides);
    } else if (elems->hw_state.num_bindings)
-      VKSCR(CmdBindVertexBuffers)(ctx->bs->cmdbuf, 0,
-                             elems->hw_state.num_bindings,
-                             buffers, buffer_offsets);
-
-   if (DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT2 || DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT)
-      VKCTX(CmdSetVertexInputEXT)(ctx->bs->cmdbuf,
-                                      elems->hw_state.num_bindings, elems->hw_state.dynbindings,
-                                      elems->hw_state.num_attribs, elems->hw_state.dynattribs);
+      VKCTX(CmdBindVertexBuffers)(ctx->bs->cmdbuf, 0,
+                                  elems->hw_state.num_bindings,
+                                  buffers, buffer_offsets);
 
    ctx->vertex_buffers_dirty = false;
 }
@@ -692,14 +686,9 @@ zink_draw(struct pipe_context *pctx,
       ctx->line_width_changed = false;
    }
 
-   if (BATCH_CHANGED || mode_changed ||
-       ctx->gfx_pipeline_state.modules_changed ||
-       rast_state_changed) {
-      bool depth_bias =
-         zink_prim_type(ctx, dinfo) == MESA_PRIM_TRIANGLES &&
-         rast_state->offset_fill;
-
-      if (depth_bias) {
+   bool using_depth_bias = zink_prim_type(ctx, dinfo) == MESA_PRIM_TRIANGLES && rast_state->offset_fill;
+   if (BATCH_CHANGED || using_depth_bias != ctx->was_using_depth_bias || ctx->depth_bias_changed) {
+      if (using_depth_bias) {
          if (rast_state->base.offset_units_unscaled) {
             VKCTX(CmdSetDepthBias)(bs->cmdbuf, rast_state->offset_units * ctx->depth_bias_scale_factor, rast_state->offset_clamp, rast_state->offset_scale);
          } else {
@@ -709,7 +698,9 @@ zink_draw(struct pipe_context *pctx,
          VKCTX(CmdSetDepthBias)(bs->cmdbuf, 0.0f, 0.0f, 0.0f);
       }
    }
+   ctx->was_using_depth_bias = using_depth_bias;
    ctx->rast_state_changed = false;
+   ctx->depth_bias_changed = false;
 
    if (DYNAMIC_STATE != ZINK_NO_DYNAMIC_STATE) {
       if (ctx->sample_locations_changed) {
@@ -733,6 +724,10 @@ zink_draw(struct pipe_context *pctx,
          else
             zink_bind_vertex_buffers<ZINK_NO_DYNAMIC_STATE>(ctx);
       }
+      if ((DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT2 || DYNAMIC_STATE == ZINK_DYNAMIC_VERTEX_INPUT) && (BATCH_CHANGED || ctx->vertex_state_changed))
+         VKCTX(CmdSetVertexInputEXT)(ctx->bs->cmdbuf,
+                                     ctx->element_state->hw_state.num_bindings, ctx->element_state->hw_state.dynbindings,
+                                     ctx->element_state->hw_state.num_attribs, ctx->element_state->hw_state.dynattribs);
    }
 
    if (BATCH_CHANGED) {
@@ -833,6 +828,7 @@ zink_draw(struct pipe_context *pctx,
       }
       VKCTX(CmdBeginTransformFeedbackEXT)(bs->cmdbuf, 0, ctx->num_so_targets, counter_buffers, counter_buffer_offsets);
    }
+   ctx->vertex_state_changed = false;
 
    bool marker = false;
    if (unlikely(zink_tracing)) {

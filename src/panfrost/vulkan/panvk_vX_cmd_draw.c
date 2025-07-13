@@ -220,6 +220,11 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
    memset(state->render.fb.bos, 0, sizeof(state->render.fb.bos));
 #endif
 
+   state->render.first_provoking_vertex = U_TRISTATE_UNSET;
+#if PAN_ARCH >= 10
+   state->render.maybe_set_tds_provoking_vertex = NULL;
+   state->render.maybe_set_fbds_provoking_vertex = NULL;
+#endif
    memset(state->render.fb.crc_valid, 0, sizeof(state->render.fb.crc_valid));
    memset(&state->render.color_attachments, 0,
           sizeof(state->render.color_attachments));
@@ -233,6 +238,7 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
    cmdbuf->state.gfx.render.view_mask = pRenderingInfo->viewMask;
    *fbinfo = (struct pan_fb_info){
       .tile_buf_budget = panfrost_query_optimal_tib_size(phys_dev->model),
+      .z_tile_buf_budget = panfrost_query_optimal_z_tib_size(phys_dev->model),
       .nr_samples = 1,
       .rt_count = pRenderingInfo->colorAttachmentCount,
    };
@@ -296,6 +302,13 @@ panvk_per_arch(cmd_init_render_state)(struct panvk_cmd_buffer *cmdbuf,
    assert(fbinfo->width && fbinfo->height);
 
    GENX(pan_select_tile_size)(fbinfo);
+
+#if PAN_ARCH != 6
+   if (fbinfo->cbuf_allocation > fbinfo->tile_buf_budget) {
+      vk_perf(VK_LOG_OBJS(&cmdbuf->vk.base),
+              "Using too much tile-memory, disabling pipelining");
+   }
+#endif
 }
 
 void
@@ -525,18 +538,98 @@ void
 panvk_per_arch(cmd_preload_render_area_border)(
    struct panvk_cmd_buffer *cmdbuf, const VkRenderingInfo *render_info)
 {
+   const unsigned meta_tile_size = panfrost_meta_tile_size(PAN_ARCH);
    struct panvk_cmd_graphics_state *state = &cmdbuf->state.gfx;
    struct pan_fb_info *fbinfo = &state->render.fb.info;
-   bool render_area_is_32x32_aligned =
-      ((fbinfo->extent.minx | fbinfo->extent.miny) % 32) == 0 &&
-      (fbinfo->extent.maxx + 1 == fbinfo->width ||
-       (fbinfo->extent.maxx % 32) == 31) &&
-      (fbinfo->extent.maxy + 1 == fbinfo->height ||
-       (fbinfo->extent.maxy % 32) == 31);
 
-   /* If the render area is aligned on a 32x32 section, we're good. */
-   if (!render_area_is_32x32_aligned)
+   bool render_area_is_aligned =
+      ((fbinfo->extent.minx | fbinfo->extent.miny) % meta_tile_size) == 0 &&
+      (fbinfo->extent.maxx + 1 == fbinfo->width ||
+       (fbinfo->extent.maxx % meta_tile_size) == (meta_tile_size - 1)) &&
+      (fbinfo->extent.maxy + 1 == fbinfo->height ||
+       (fbinfo->extent.maxy % meta_tile_size) == (meta_tile_size - 1));
+
+   /* If the render area is aligned on the meta tile size, we're good. */
+   if (!render_area_is_aligned)
       panvk_per_arch(cmd_force_fb_preload)(cmdbuf, render_info);
+}
+
+static void
+prepare_iam_sysvals(struct panvk_cmd_buffer *cmdbuf, BITSET_WORD *dirty_sysvals)
+{
+   const struct vk_input_attachment_location_state *ial =
+      &cmdbuf->vk.dynamic_graphics_state.ial;
+   struct panvk_input_attachment_info iam[INPUT_ATTACHMENT_MAP_SIZE];
+   uint32_t catt_count =
+      ial->color_attachment_count == MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN
+         ? MAX_RTS
+         : ial->color_attachment_count;
+
+   memset(iam, ~0, sizeof(iam));
+
+   assert(catt_count <= MAX_RTS);
+
+   for (uint32_t i = 0; i < catt_count; i++) {
+      if (ial->color_map[i] == MESA_VK_ATTACHMENT_UNUSED ||
+          !(cmdbuf->state.gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_COLOR_BIT(i)))
+         continue;
+
+      VkFormat fmt = cmdbuf->state.gfx.render.color_attachments.fmts[i];
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      struct mali_internal_conversion_packed conv;
+      uint32_t ia_idx = ial->color_map[i] + 1;
+      assert(ia_idx < ARRAY_SIZE(iam));
+
+      iam[ia_idx].target = PANVK_COLOR_ATTACHMENT(i);
+
+      pan_pack(&conv, INTERNAL_CONVERSION, cfg) {
+         cfg.memory_format =
+            GENX(panfrost_dithered_format_from_pipe_format)(pfmt, false);
+#if PAN_ARCH <= 7
+         cfg.register_format =
+            vk_format_is_uint(fmt)   ? MALI_REGISTER_FILE_FORMAT_U32
+            : vk_format_is_sint(fmt) ? MALI_REGISTER_FILE_FORMAT_I32
+                                     : MALI_REGISTER_FILE_FORMAT_F32;
+#endif
+      }
+
+      iam[ia_idx].conversion = conv.opaque[0];
+   }
+
+   if (ial->depth_att != MESA_VK_ATTACHMENT_UNUSED) {
+      uint32_t ia_idx =
+         ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX ? 0 : ial->depth_att + 1;
+
+      assert(ia_idx < ARRAY_SIZE(iam));
+      iam[ia_idx].target = PANVK_ZS_ATTACHMENT;
+
+#if PAN_ARCH <= 7
+      /* On v7, we need to pass the depth format around. If we use a conversion
+       * of zero, like we do on v9+, the GPU reports an INVALID_INSTR_ENC. */
+      VkFormat fmt = cmdbuf->state.gfx.render.z_attachment.fmt;
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      struct mali_internal_conversion_packed conv;
+
+      pan_pack(&conv, INTERNAL_CONVERSION, cfg) {
+         cfg.register_format = MALI_REGISTER_FILE_FORMAT_F32;
+         cfg.memory_format =
+            GENX(panfrost_dithered_format_from_pipe_format)(pfmt, false);
+      }
+      iam[ia_idx].conversion = conv.opaque[0];
+#endif
+   }
+
+   if (ial->stencil_att != MESA_VK_ATTACHMENT_UNUSED) {
+      uint32_t ia_idx =
+         ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX ? 0 : ial->stencil_att + 1;
+
+      assert(ia_idx < ARRAY_SIZE(iam));
+      iam[ia_idx].target = PANVK_ZS_ATTACHMENT;
+   }
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(iam); i++)
+      set_gfx_sysval(cmdbuf, dirty_sysvals, iam[i], iam[i]);
 }
 
 /* This value has been selected to get
@@ -548,11 +641,14 @@ void
 panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                                          const struct panvk_draw_info *info)
 {
+   const struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct vk_color_blend_state *cb = &cmdbuf->vk.dynamic_graphics_state.cb;
    const struct panvk_shader *fs = get_fs(cmdbuf);
    uint32_t noperspective_varyings = fs ? fs->info.varyings.noperspective : 0;
    BITSET_DECLARE(dirty_sysvals, MAX_SYSVAL_FAUS) = {0};
 
+   set_gfx_sysval(cmdbuf, dirty_sysvals, printf_buffer_address,
+                  dev->printf.bo->addr.dev);
    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.noperspective_varyings,
                   noperspective_varyings);
    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.first_vertex, info->vertex.base);
@@ -643,6 +739,9 @@ panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                         CLAMP(z_offset, 0.0f, 1.0f));
       }
    }
+
+   if (dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP))
+      prepare_iam_sysvals(cmdbuf, dirty_sysvals);
 
    const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
 

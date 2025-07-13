@@ -560,6 +560,9 @@ emit_shader_state_record(struct v3d_context *v3d,
                 shader.fragment_shader_does_z_writes =
                         v3d->prog.fs->prog_data.fs->writes_z;
 
+                shader.enable_sample_rate_shading =
+                        job->msaa && v3d->prog.fs->prog_data.fs->force_per_sample_msaa;
+
                 /* Set if the EZ test must be disabled (due to shader side
                  * effects and the early_z flag not being present in the
                  * shader).
@@ -1403,10 +1406,12 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
         else
                 update_double_buffer_score(job, draws[0].count * info->instance_count);
 
-        if (job->referenced_size > 768 * 1024 * 1024) {
-                perf_debug("Flushing job with %dkb to try to free up memory\n",
-                        job->referenced_size / 1024);
-                v3d_flush(pctx);
+        if (job->referenced_size > V3D_JOB_MAX_BO_REFERENCED_SIZE ||
+            job->submit.bo_handle_count > V3D_JOB_MAX_BO_HANDLE_COUNT) {
+                perf_debug("Flushing job with %u BOs referencing %dkb to try to free up memory\n",
+                           job->submit.bo_handle_count,
+                           job->referenced_size / 1024);
+                v3d_job_submit(v3d, job);
         }
 
         if (V3D_DBG(ALWAYS_FLUSH))

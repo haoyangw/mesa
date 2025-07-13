@@ -11,7 +11,8 @@ _libmesaclc_c_args = []
 _libmesaclc_cpp_args = ['-DLLVM_LIB_DIR="@0@"'.format(llvm_libdir)]
 _libmesaclc_sources = []
 
-if not _shared_llvm
+if not _shared_llvm or \
+    get_option('mesa-clc-bundle-headers') == 'enabled'
   # LLVM 16 moved clang header path from using full version to only major version
   if dep_llvm.version().version_compare('< 16')
     # Prior to LLVM 16, this path used a full version
@@ -120,10 +121,7 @@ idep_mesaclc = declare_dependency(
   link_args : _idep_mesaclc_link_args,
 )
 
-if get_option('mesa-clc') != 'system' and (with_gallium_asahi or \
-                                           with_asahi_vk or \
-                                           with_intel_vk or \
-                                           with_gallium_iris or \
+if get_option('mesa-clc') != 'system' and (with_driver_using_cl or \
                                            get_option('install-mesa-clc'))
   prog_mesa_clc = executable(
     'mesa_clc',

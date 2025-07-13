@@ -29,7 +29,7 @@
 
 #include "brw_eu.h"
 #include "brw_disasm_info.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_generator.h"
 #include "brw_cfg.h"
 #include "dev/intel_debug.h"
@@ -161,7 +161,7 @@ brw_generator::patch_halt_jumps()
 }
 
 void
-brw_generator::generate_send(fs_inst *inst,
+brw_generator::generate_send(brw_inst *inst,
                             struct brw_reg dst,
                             struct brw_reg desc,
                             struct brw_reg ex_desc,
@@ -194,7 +194,7 @@ brw_generator::generate_send(fs_inst *inst,
 }
 
 void
-brw_generator::generate_mov_indirect(fs_inst *inst,
+brw_generator::generate_mov_indirect(brw_inst *inst,
                                     struct brw_reg dst,
                                     struct brw_reg reg,
                                     struct brw_reg indirect_byte_offset)
@@ -325,7 +325,7 @@ brw_generator::generate_mov_indirect(fs_inst *inst,
 }
 
 void
-brw_generator::generate_shuffle(fs_inst *inst,
+brw_generator::generate_shuffle(brw_inst *inst,
                                struct brw_reg dst,
                                struct brw_reg src,
                                struct brw_reg idx)
@@ -456,7 +456,7 @@ brw_generator::generate_shuffle(fs_inst *inst,
 }
 
 void
-brw_generator::generate_quad_swizzle(const fs_inst *inst,
+brw_generator::generate_quad_swizzle(const brw_inst *inst,
                                     struct brw_reg dst, struct brw_reg src,
                                     unsigned swiz)
 {
@@ -526,7 +526,7 @@ brw_generator::generate_quad_swizzle(const fs_inst *inst,
 }
 
 void
-brw_generator::generate_barrier(fs_inst *, struct brw_reg src)
+brw_generator::generate_barrier(brw_inst *, struct brw_reg src)
 {
    brw_barrier(p, src);
    if (devinfo->ver >= 12) {
@@ -566,7 +566,7 @@ brw_generator::generate_barrier(fs_inst *, struct brw_reg src)
  * appropriate swizzling.
  */
 void
-brw_generator::generate_ddx(const fs_inst *inst,
+brw_generator::generate_ddx(const brw_inst *inst,
                            struct brw_reg dst, struct brw_reg src)
 {
    unsigned vstride, width;
@@ -599,7 +599,7 @@ brw_generator::generate_ddx(const fs_inst *inst,
  * left.
  */
 void
-brw_generator::generate_ddy(const fs_inst *inst,
+brw_generator::generate_ddy(const brw_inst *inst,
                            struct brw_reg dst, struct brw_reg src)
 {
    const uint32_t type_size = brw_type_size_bytes(src.type);
@@ -652,7 +652,7 @@ brw_generator::generate_ddy(const fs_inst *inst,
 }
 
 void
-brw_generator::generate_halt(fs_inst *)
+brw_generator::generate_halt(brw_inst *)
 {
    /* This HALT will be patched up at FB write time to point UIP at the end of
     * the program, and at brw_uip_jip() JIP will be set to the end of the
@@ -701,7 +701,7 @@ brw_generator::generate_halt(fs_inst *)
  * information required by either set of opcodes.
  */
 void
-brw_generator::generate_scratch_header(fs_inst *inst,
+brw_generator::generate_scratch_header(brw_inst *inst,
                                       struct brw_reg dst,
                                       struct brw_reg src)
 {
@@ -741,23 +741,10 @@ brw_generator::enable_debug(const char *shader_name)
    this->shader_name = shader_name;
 }
 
-static gfx12_systolic_depth
-translate_systolic_depth(unsigned d)
-{
-   /* Could also return (ffs(d) - 1) & 3. */
-   switch (d) {
-   case 2:  return BRW_SYSTOLIC_DEPTH_2;
-   case 4:  return BRW_SYSTOLIC_DEPTH_4;
-   case 8:  return BRW_SYSTOLIC_DEPTH_8;
-   case 16: return BRW_SYSTOLIC_DEPTH_16;
-   default: unreachable("Invalid systolic depth.");
-   }
-}
-
 int
 brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
                             struct brw_shader_stats shader_stats,
-                            const brw::performance &perf,
+                            const brw_performance &perf,
                             struct brw_compile_stats *stats,
                             unsigned max_polygons)
 {
@@ -773,8 +760,8 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 
    struct disasm_info *disasm_info = disasm_initialize(p->isa, cfg);
 
-   fs_inst *prev_inst = NULL;
-   foreach_block_and_inst (block, fs_inst, inst, cfg) {
+   brw_inst *prev_inst = NULL;
+   foreach_block_and_inst (block, brw_inst, inst, cfg) {
       if (inst->opcode == SHADER_OPCODE_UNDEF)
          continue;
 
@@ -1084,6 +1071,10 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 	 brw_DO(p, brw_get_default_exec_size(p));
 	 break;
 
+      case SHADER_OPCODE_FLOW:
+         /* Do nothing. */
+         break;
+
       case BRW_OPCODE_BREAK:
 	 brw_BREAK(p);
 	 break;
@@ -1194,23 +1185,6 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
       case BRW_OPCODE_HALT:
          generate_halt(inst);
          break;
-
-      case SHADER_OPCODE_INTERLOCK:
-      case SHADER_OPCODE_MEMORY_FENCE: {
-         assert(src[1].file == IMM);
-         assert(src[2].file == IMM);
-
-         const enum opcode send_op = inst->opcode == SHADER_OPCODE_INTERLOCK ?
-            BRW_OPCODE_SENDC : BRW_OPCODE_SEND;
-
-         brw_memory_fence(p, dst, src[0], send_op,
-                          brw_message_target(inst->sfid),
-                          inst->desc,
-                          /* commit_enable */ src[1].ud,
-                          /* bti */ src[2].ud);
-         send_count++;
-         break;
-      }
 
       case FS_OPCODE_SCHEDULING_FENCE:
          if (inst->sources == 0 && swsb.regdist == 0 &&
@@ -1554,4 +1528,17 @@ brw_generator::get_assembly()
    prog_data->relocs = brw_get_shader_relocs(p, &prog_data->num_relocs);
 
    return brw_get_program(p, &prog_data->program_size);
+}
+
+void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
+                        const struct brw_compile_params *params)
+{
+   /* Do not memset the structure to 0, the driver might have put some bits of
+    * information in there.
+    */
+   prog_data->ray_queries = params->nir->info.ray_queries;
+   prog_data->stage = params->nir->info.stage;
+   prog_data->source_hash = params->source_hash;
+   prog_data->total_scratch = 0;
+   prog_data->total_shared = params->nir->info.shared_size;
 }

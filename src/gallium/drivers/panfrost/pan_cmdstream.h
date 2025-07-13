@@ -157,6 +157,7 @@ panfrost_overdraw_alpha(const struct panfrost_context *ctx, bool zero)
 }
 #endif
 
+#if PAN_ARCH < 13
 static inline void
 panfrost_emit_primitive_size(struct panfrost_context *ctx, bool points,
                              uint64_t size_array,
@@ -168,10 +169,11 @@ panfrost_emit_primitive_size(struct panfrost_context *ctx, bool points,
       if (panfrost_writes_point_size(ctx)) {
          cfg.size_array = size_array;
       } else {
-         cfg.constant = points ? rast->base.point_size : rast->base.line_width;
+         cfg.fixed_sized = points ? rast->base.point_size : rast->base.line_width;
       }
    }
 }
+#endif
 
 static inline uint8_t
 pan_draw_mode(enum mesa_prim mode)
@@ -256,11 +258,13 @@ panfrost_get_position_shader(struct panfrost_batch *batch,
    return vs_ptr;
 }
 
+#if PAN_ARCH < 12
 static inline uint64_t
 panfrost_get_varying_shader(struct panfrost_batch *batch)
 {
    return batch->rsd[PIPE_SHADER_VERTEX] + (2 * pan_size(SHADER_PROGRAM));
 }
+#endif
 
 static inline unsigned
 panfrost_vertex_attribute_stride(struct panfrost_compiled_shader *vs,
@@ -281,7 +285,8 @@ panfrost_emit_resources(struct panfrost_batch *batch,
 {
    struct panfrost_context *ctx = batch->ctx;
    struct panfrost_ptr T;
-   unsigned nr_tables = PAN_NUM_RESOURCE_TABLES;
+   unsigned nr_tables =
+      ALIGN_POT(PAN_NUM_RESOURCE_TABLES, MALI_RESOURCE_TABLE_SIZE_ALIGNMENT);
 
    /* Although individual resources need only 16 byte alignment, the
     * resource table as a whole must be 64-byte aligned.

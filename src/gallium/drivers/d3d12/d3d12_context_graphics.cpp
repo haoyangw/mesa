@@ -346,7 +346,7 @@ d3d12_bind_blend_state(struct pipe_context *pctx, void *blend_state)
    if (new_state == NULL)
       ctx->missing_dual_src_outputs = false;
    else if (new_state != NULL && (old_state == NULL || old_state->is_dual_src != new_state->is_dual_src))
-      ctx->missing_dual_src_outputs = missing_dual_src_outputs(ctx);
+      ctx->missing_dual_src_outputs = missing_dual_src_outputs(ctx) != 0;
 }
 
 static void
@@ -977,7 +977,6 @@ d3d12_set_sampler_views(struct pipe_context *pctx,
                         unsigned start_slot,
                         unsigned num_views,
                         unsigned unbind_num_trailing_slots,
-                        bool take_ownership,
                         struct pipe_sampler_view **views)
 {
    struct d3d12_context *ctx = d3d12_context(pctx);
@@ -993,12 +992,7 @@ d3d12_set_sampler_views(struct pipe_context *pctx,
       if (new_view)
          d3d12_increment_sampler_view_bind_count(pctx, shader_type, new_view);
 
-      if (take_ownership) {
-         pipe_sampler_view_reference(&old_view, NULL);
-         old_view = views[i];
-      } else {
-         pipe_sampler_view_reference(&old_view, views[i]);
-      }
+      pipe_sampler_view_reference(&old_view, views[i]);
 
       if (views[i]) {
          dxil_wrap_sampler_state &wss = ctx->tex_wrap_states[shader_type][start_slot + i];
@@ -1114,7 +1108,7 @@ d3d12_bind_fs_state(struct pipe_context *pctx,
    bind_stage(ctx, PIPE_SHADER_FRAGMENT,
               (struct d3d12_shader_selector *) fss);
    ctx->has_flat_varyings = has_flat_varyings(ctx);
-   ctx->missing_dual_src_outputs = missing_dual_src_outputs(ctx);
+   ctx->missing_dual_src_outputs = missing_dual_src_outputs(ctx) != 0;
    ctx->manual_depth_range = manual_depth_range(ctx);
 }
 
@@ -2065,8 +2059,10 @@ d3d12_clear(struct pipe_context *pctx,
       for (int i = 0; i < ctx->fb.nr_cbufs; ++i) {
          if (buffers & (PIPE_CLEAR_COLOR0 << i)) {
             struct pipe_surface *psurf = ctx->fb.cbufs[i];
+            uint16_t width, height;
+            pipe_surface_size(psurf, &width, &height);
             d3d12_clear_render_target(pctx, psurf, color,
-                                      0, 0, psurf->width, psurf->height,
+                                      0, 0, width, height,
                                       true);
          }
       }
@@ -2074,10 +2070,12 @@ d3d12_clear(struct pipe_context *pctx,
 
    if (buffers & PIPE_CLEAR_DEPTHSTENCIL && ctx->fb.zsbuf) {
       struct pipe_surface *psurf = ctx->fb.zsbuf;
+      uint16_t width, height;
+      pipe_surface_size(psurf, &width, &height);
       d3d12_clear_depth_stencil(pctx, psurf,
                                 buffers & PIPE_CLEAR_DEPTHSTENCIL,
                                 depth, stencil,
-                                0, 0, psurf->width, psurf->height,
+                                0, 0, width, height,
                                 true);
    }
 }
@@ -2239,6 +2237,7 @@ d3d12_init_graphics_context_functions(struct d3d12_context *ctx)
 
    ctx->base.create_sampler_view = d3d12_create_sampler_view;
    ctx->base.sampler_view_destroy = d3d12_destroy_sampler_view;
+   ctx->base.sampler_view_release = u_default_sampler_view_release;
 
    ctx->base.create_vertex_elements_state = d3d12_create_vertex_elements_state;
    ctx->base.bind_vertex_elements_state = d3d12_bind_vertex_elements_state;

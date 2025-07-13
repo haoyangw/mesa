@@ -46,20 +46,30 @@ class TestCommit:
         def test_not_nominated(self, unnominated_commit: 'core.Commit'):
             c = unnominated_commit
             v = c.to_json()
-            assert v == {'sha': 'abc123', 'description': 'sub: A commit', 'nominated': False,
-                         'nomination_type': None, 'resolution': core.Resolution.UNRESOLVED.value,
-                         'main_sha': '45678', 'because_sha': None}
+            assert v == {
+                'sha': 'abc123',
+                'description': 'sub: A commit',
+                'nominated': False,
+                'nomination_type': core.NominationType.NONE.value,
+                'resolution': core.Resolution.UNRESOLVED.value,
+                'main_sha': '45678',
+                'because_sha': None,
+                'notes': None,
+            }
 
         def test_nominated(self, nominated_commit: 'core.Commit'):
             c = nominated_commit
             v = c.to_json()
-            assert v == {'sha': 'abc123',
-                         'description': 'sub: A commit',
-                         'nominated': True,
-                         'nomination_type': core.NominationType.CC.value,
-                         'resolution': core.Resolution.UNRESOLVED.value,
-                         'main_sha': None,
-                         'because_sha': None}
+            assert v == {
+                'sha': 'abc123',
+                'description': 'sub: A commit',
+                'nominated': True,
+                'nomination_type': core.NominationType.CC.value,
+                'resolution': core.Resolution.UNRESOLVED.value,
+                'main_sha': None,
+                'because_sha': None,
+                'notes': None,
+            }
 
     class TestFromJson:
 
@@ -382,7 +392,7 @@ class TestResolveNomination:
             await core.resolve_nomination(c, '16.1')
 
         assert not c.nominated
-        assert c.nomination_type is None
+        assert c.nomination_type is core.NominationType.NONE
 
     @pytest.mark.asyncio
     async def test_backport_is_nominated(self):
@@ -415,7 +425,7 @@ class TestResolveNomination:
             await core.resolve_nomination(c, '16.1')
 
         assert not c.nominated
-        assert c.nomination_type is None
+        assert c.nomination_type is core.NominationType.NONE
 
     @pytest.mark.asyncio
     async def test_revert_is_nominated(self):

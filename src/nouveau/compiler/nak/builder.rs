@@ -145,7 +145,7 @@ pub trait SSABuilder: Builder {
 
     fn shl64(&mut self, x: Src, shift: Src) -> SSARef {
         let x = x.as_ssa().unwrap();
-        debug_assert!(shift.src_mod.is_none());
+        debug_assert!(shift.is_unmodified());
 
         let dst = self.alloc_ssa(RegFile::GPR, 2);
         if self.sm() >= 70 {
@@ -161,21 +161,16 @@ pub trait SSABuilder: Builder {
             });
         } else {
             // On Maxwell and earlier, shf.l doesn't work without .high so we
-            // have to use a regular 32-bit shift here.  32-bit shift doesn't
-            // have the NIR wrap semantics so we need to wrap manually.
-            let shift = if let SrcRef::Imm32(imm) = shift.src_ref {
-                (imm & 0x3f).into()
-            } else {
-                self.lop2(LogicOp2::And, shift, 0x3f.into()).into()
-            };
+            // have to use only the high parts, hard-coding the lower parts
+            // to rZ
             self.push_op(OpShf {
                 dst: dst[0].into(),
                 low: 0.into(),
                 high: x[0].into(),
                 shift,
                 right: false,
-                wrap: false,
-                data_type: IntType::U32,
+                wrap: true,
+                data_type: IntType::U64,
                 dst_high: true,
             });
         }
@@ -219,7 +214,7 @@ pub trait SSABuilder: Builder {
 
     fn shr64(&mut self, x: Src, shift: Src, signed: bool) -> SSARef {
         let x = x.as_ssa().unwrap();
-        debug_assert!(shift.src_mod.is_none());
+        debug_assert!(shift.is_unmodified());
 
         let dst = self.alloc_ssa(RegFile::GPR, 2);
         self.push_op(OpShf {
@@ -545,6 +540,9 @@ pub trait SSABuilder: Builder {
 
         let dst = self.alloc_ssa(RegFile::Pred, 1);
         match cmp_op {
+            IntCmpOp::False | IntCmpOp::True => {
+                panic!("These don't make sense for the builder helper");
+            }
             IntCmpOp::Eq | IntCmpOp::Ne => {
                 self.push_op(OpISetP {
                     dst: dst.into(),
@@ -608,6 +606,72 @@ pub trait SSABuilder: Builder {
                     });
                 }
             }
+        }
+        dst
+    }
+
+    fn lea(&mut self, a: Src, b: Src, shift: u8) -> SSARef {
+        let dst = self.alloc_ssa(RegFile::GPR, 1);
+        assert!(self.sm() >= 70);
+
+        self.push_op(OpLea {
+            dst: dst.into(),
+            overflow: Dst::None,
+            a: a,
+            b: b,
+            a_high: 0.into(),
+            dst_high: false,
+            shift: shift % 32,
+            intermediate_mod: SrcMod::None,
+        });
+
+        dst
+    }
+
+    fn lea64(&mut self, a: Src, b: Src, shift: u8) -> SSARef {
+        assert!(self.sm() >= 70);
+        assert!(a.is_unmodified());
+        assert!(b.is_unmodified());
+
+        let a = a.as_ssa().unwrap();
+        let b = b.as_ssa().unwrap();
+        let dst = self.alloc_ssa(RegFile::GPR, 2);
+        let shift = shift % 64;
+        if shift >= 32 {
+            self.copy_to(dst[0].into(), b[0].into());
+            self.push_op(OpLea {
+                dst: dst[1].into(),
+                overflow: Dst::None,
+                a: a[0].into(),
+                b: b[1].into(),
+                a_high: 0.into(),
+                dst_high: false,
+                shift: shift - 32,
+                intermediate_mod: SrcMod::None,
+            });
+        } else {
+            let carry = self.alloc_ssa(RegFile::Pred, 1);
+            self.push_op(OpLea {
+                dst: dst[0].into(),
+                overflow: carry.into(),
+                a: a[0].into(),
+                b: b[0].into(),
+                a_high: 0.into(),
+                dst_high: false,
+                shift: shift,
+                intermediate_mod: SrcMod::None,
+            });
+            self.push_op(OpLeaX {
+                dst: dst[1].into(),
+                overflow: Dst::None,
+                a: a[0].into(),
+                b: b[1].into(),
+                a_high: a[1].into(),
+                carry: carry.into(),
+                dst_high: true,
+                shift: shift,
+                intermediate_mod: SrcMod::None,
+            });
         }
         dst
     }

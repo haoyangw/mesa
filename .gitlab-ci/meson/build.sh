@@ -83,7 +83,7 @@ if [ -n "$HOST_BUILD_OPTIONS" ]; then
 
     section_switch meson-host-build "meson: host build"
 
-    meson configure
+    meson configure --no-pager
     ninja
     ninja install
     popd
@@ -120,8 +120,8 @@ case $CI_PIPELINE_SOURCE in
 	      # /tmp/ccWlDCPV.s:15250880: Error: operand out of range (0xfffffffffdd4e688 is not between 0xfffffffffe000000 and 0x1fffffc)
 	      LTO=false
       # enable one by one for now
-      elif [ "$CI_JOB_NAME" == "fedora-release" ] || [ "$CI_JOB_NAME" == "debian-build-testing" ]; then
-	      LTO=true
+      elif [ "$CI_JOB_NAME" == "fedora-release" ]; then
+	      LTO=false
       else
 	      LTO=false
       fi
@@ -186,7 +186,7 @@ meson setup _build \
       -D backend_max_links=${MAX_LD} \
       ${EXTRA_OPTION}
 cd _build
-meson configure
+meson configure --no-pager
 
 uncollapsed_section_switch meson-build "meson: build"
 

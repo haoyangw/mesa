@@ -846,11 +846,12 @@ draw_textured_quad(struct gl_context *ctx, GLint x, GLint y, GLfloat z,
 
    /* user textures, plus the drawpix textures */
    if (fpv) {
-      /* drawing a color image */
       struct pipe_sampler_view *sampler_views[PIPE_MAX_SAMPLERS];
+      unsigned num_owned_views = 0;
+      /* drawing a color image */
       unsigned num_views =
          st_get_sampler_views(st, PIPE_SHADER_FRAGMENT,
-                              ctx->FragmentProgram._Current, sampler_views);
+                              ctx->FragmentProgram._Current, sampler_views, &num_owned_views);
 
       num_views = MAX3(fpv->drawpix_sampler + 1, fpv->pixelmap_sampler + 1,
                        num_views);
@@ -859,17 +860,19 @@ draw_textured_quad(struct gl_context *ctx, GLint x, GLint y, GLfloat z,
       if (sv[1])
          sampler_views[fpv->pixelmap_sampler] = sv[1];
       pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, num_views, 0,
-                              true, sampler_views);
+                              sampler_views);
       st->state.num_sampler_views[PIPE_SHADER_FRAGMENT] = num_views;
+
+      /* release YUV views back to driver */
+      unsigned base_idx = num_views - num_owned_views;
+      for (unsigned i = 0; i < num_owned_views; i++)
+         pipe->sampler_view_release(pipe, sampler_views[base_idx + i]);
    } else {
       /* drawing a depth/stencil image */
       pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, num_sampler_view,
-                              0, false, sv);
+                              0, sv);
       st->state.num_sampler_views[PIPE_SHADER_FRAGMENT] =
          MAX2(st->state.num_sampler_views[PIPE_SHADER_FRAGMENT], num_sampler_view);
-
-      for (unsigned i = 0; i < num_sampler_view; i++)
-         pipe_sampler_view_reference(&sv[i], NULL);
    }
 
    /* viewport state: viewport matching window dims */
@@ -1322,8 +1325,7 @@ st_DrawPixels(struct gl_context *ctx, GLint x, GLint y,
       driver_fp = fpv->base.driver_shader;
 
       if (ctx->Pixel.MapColorFlag && format != GL_COLOR_INDEX) {
-         pipe_sampler_view_reference(&sv[1],
-                                     st->pixel_xfer.pixelmap_sampler_view);
+         sv[1] = st->pixel_xfer.pixelmap_sampler_view;
          num_sampler_view++;
       }
 
@@ -1362,7 +1364,7 @@ st_DrawPixels(struct gl_context *ctx, GLint x, GLint y,
       if (!sv[1]) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glDrawPixels");
          pipe_resource_reference(&pt, NULL);
-         pipe_sampler_view_reference(&sv[0], NULL);
+         st->pipe->sampler_view_release(st->pipe, sv[0]);
          return;
       }
       num_sampler_view++;
@@ -1377,6 +1379,10 @@ st_DrawPixels(struct gl_context *ctx, GLint x, GLint y,
                       driver_fp, fpv,
                       ctx->Current.RasterColor,
                       GL_FALSE, write_depth, write_stencil);
+
+
+   for (unsigned i = 0; i < num_sampler_view; i++)
+      st->pipe->sampler_view_release(st->pipe, sv[i]);
 
    /* free the texture (but may persist in the cache) */
    pipe_resource_reference(&pt, NULL);
@@ -1661,6 +1667,7 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
    struct gl_pixelstore_attrib pack = ctx->DefaultPacking;
    GLboolean write_stencil = GL_FALSE;
    GLboolean write_depth = GL_FALSE;
+   bool frontend_owns_sv1 = false;
 
    _mesa_update_draw_buffer_bounds(ctx, ctx->DrawBuffer);
 
@@ -1707,8 +1714,7 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
       driver_fp = fpv->base.driver_shader;
 
       if (ctx->Pixel.MapColorFlag) {
-         pipe_sampler_view_reference(&sv[1],
-                                     st->pixel_xfer.pixelmap_sampler_view);
+         sv[1] = st->pixel_xfer.pixelmap_sampler_view;
          num_sampler_view++;
       }
 
@@ -1852,10 +1858,11 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
       if (!sv[1]) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "glCopyPixels");
          pipe_resource_reference(&pt, NULL);
-         pipe_sampler_view_reference(&sv[0], NULL);
+         st->pipe->sampler_view_release(st->pipe, sv[0]);
          return;
       }
       num_sampler_view++;
+      frontend_owns_sv1 = true;
    }
    /* Copy the src region to the temporary texture. */
    {
@@ -1903,6 +1910,10 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
                       driver_fp, fpv,
                       ctx->Current.Attrib[VERT_ATTRIB_COLOR0],
                       invertTex, write_depth, write_stencil);
+
+   st->pipe->sampler_view_release(st->pipe, sv[0]);
+   if (frontend_owns_sv1)
+      st->pipe->sampler_view_release(st->pipe, sv[1]);
 
    pipe_resource_reference(&pt, NULL);
 }

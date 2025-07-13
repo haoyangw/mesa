@@ -8,6 +8,7 @@
 #include "ac_nir.h"
 #include "ac_nir_helpers.h"
 #include "nir_builder.h"
+#include "nir_tcs_info.h"
 #include "util/u_math.h"
 
 /*
@@ -107,6 +108,7 @@
 typedef struct {
    /* Which hardware generation we're dealing with */
    enum amd_gfx_level gfx_level;
+   unsigned wave_size;
    nir_tcs_info tcs_info;
 
    /* I/O semantic -> real location used by lowering. */
@@ -822,7 +824,7 @@ hs_msg_group_vote_use_memory(nir_builder *b, lower_tess_io_state *st,
 
    nir_if *thread0 = nir_push_if(&top_b,
                                  nir_iand(&top_b, nir_ieq_imm(&top_b, nir_load_subgroup_id(&top_b), 0),
-                                          nir_inverse_ballot(&top_b, 1, nir_imm_ivec4(&top_b, 0x1, 0, 0, 0))));
+                                          nir_inverse_ballot(&top_b, 1, nir_imm_intN_t(&top_b, 0x1, st->wave_size))));
    {
       /* 0x3 is the initial bitmask (tf0 | tf1). Each subgroup will do atomic iand on it for the vote. */
       nir_store_shared(&top_b, nir_imm_int(&top_b, 0x3), nir_imm_int(&top_b, 0),
@@ -918,7 +920,7 @@ hs_msg_group_vote_use_memory(nir_builder *b, lower_tess_io_state *st,
       const unsigned tcs_vertices_out = b->shader->info.tess.tcs_vertices_out;
       assert(tcs_vertices_out <= 32);
       nir_def *is_first_active_lane =
-         nir_inverse_ballot(b, 1, nir_imm_ivec4(b, BITFIELD_MASK(tcs_vertices_out), 0, 0, 0));
+         nir_inverse_ballot(b, 1, nir_imm_intN_t(b, BITFIELD_MASK(tcs_vertices_out), st->wave_size));
 
       /* Only the first active invocation in each subgroup performs the AND reduction through LDS. */
       nir_if *if_first_active_lane = nir_push_if(b, is_first_active_lane);
@@ -942,7 +944,7 @@ hs_msg_group_vote_use_memory(nir_builder *b, lower_tess_io_state *st,
 
    /* Read the result from LDS. Only 1 lane should load it to prevent LDS bank conflicts. */
    nir_def *lds_result;
-   nir_if *if_lane0 = nir_push_if(b, nir_inverse_ballot(b, 1, nir_imm_ivec4(b, 0x1, 0, 0, 0)));
+   nir_if *if_lane0 = nir_push_if(b, nir_inverse_ballot(b, 1, nir_imm_intN_t(b, 0x1, st->wave_size)));
    if_lane0->control = nir_selection_control_divergent_always_taken;
    {
       lds_result = nir_load_shared(b, 1, 32, nir_imm_int(b, 0), .align_mul = 4);
@@ -1112,7 +1114,7 @@ hs_finale(nir_shader *shader, lower_tess_io_state *st)
    }
    nir_pop_if(b, if_invocation_id_zero);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 }
 
 static nir_def *
@@ -1134,7 +1136,8 @@ lower_tes_input_load(nir_builder *b,
    nir_def *load = NULL;
 
    AC_NIR_LOAD_IO(load, b, intrin->def.num_components, intrin->def.bit_size, io_sem.high_16bits,
-                  nir_load_buffer_amd, offchip_ring, off, offchip_offset, zero, .access = ACCESS_COHERENT);
+                  nir_load_buffer_amd, offchip_ring, off, offchip_offset, zero, .access = ACCESS_COHERENT,
+                  .memory_modes = nir_var_shader_in);
 
    return load;
 }
@@ -1166,7 +1169,7 @@ filter_any_input_access(const nir_instr *instr,
           intrin->intrinsic == nir_intrinsic_load_per_vertex_input;
 }
 
-void
+bool
 ac_nir_lower_ls_outputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -1189,12 +1192,12 @@ ac_nir_lower_ls_outputs_to_mem(nir_shader *shader,
       state.tcs_inputs_via_lds = tcs_inputs_via_lds | tcs_inputs_via_temp;
    }
 
-   nir_shader_intrinsics_pass(shader, lower_ls_output_store,
-                                nir_metadata_control_flow,
-                                &state);
+   return nir_shader_intrinsics_pass(shader, lower_ls_output_store,
+                                     nir_metadata_control_flow,
+                                     &state);
 }
 
-void
+bool
 ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
                               ac_nir_map_io_driver_location map,
                               enum amd_gfx_level gfx_level,
@@ -1217,13 +1220,13 @@ ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
       state.tcs_inputs_via_lds = shader->info.inputs_read;
    }
 
-   nir_shader_lower_instructions(shader,
-                                 filter_load_tcs_per_vertex_input,
-                                 lower_hs_per_vertex_input_load,
-                                 &state);
+   return nir_shader_lower_instructions(shader,
+                                        filter_load_tcs_per_vertex_input,
+                                        lower_hs_per_vertex_input_load,
+                                        &state);
 }
 
-void
+bool
 ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
                                ac_nir_map_io_driver_location map,
                                enum amd_gfx_level gfx_level,
@@ -1235,6 +1238,7 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
 
    lower_tess_io_state state = {
       .gfx_level = gfx_level,
+      .wave_size = wave_size,
       .tcs_info = *info,
       .tes_inputs_read = tes_inputs_read,
       .tes_patch_inputs_read = tes_patch_inputs_read,
@@ -1264,9 +1268,11 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader, const nir_tcs_info *info,
       NIR_PASS(_, shader, nir_lower_alu_to_scalar, NULL, NULL);
       NIR_PASS(_, shader, nir_lower_phis_to_scalar, true);
    }
+
+   return true;
 }
 
-void
+bool
 ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map)
 {
@@ -1278,10 +1284,10 @@ ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
       .tes_patch_inputs_read = shader->info.patch_inputs_read,
    };
 
-   nir_shader_lower_instructions(shader,
-                                 filter_any_input_access,
-                                 lower_tes_input_load,
-                                 &state);
+   return nir_shader_lower_instructions(shader,
+                                        filter_any_input_access,
+                                        lower_tes_input_load,
+                                        &state);
 }
 
 void

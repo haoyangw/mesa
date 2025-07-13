@@ -99,7 +99,7 @@ genX(cmd_buffer_ensure_cfe_state)(struct anv_cmd_buffer *cmd_buffer,
 }
 
 static void
-genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
    struct anv_compute_pipeline *pipeline =
@@ -189,7 +189,7 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 
       struct anv_state state =
          anv_cmd_buffer_merge_dynamic(cmd_buffer, iface_desc_data_dw,
-                                      pipeline->interface_descriptor_data,
+                                      pipeline->gfx9.interface_descriptor_data,
                                       GENX(INTERFACE_DESCRIPTOR_DATA_length),
                                       64);
 
@@ -226,6 +226,12 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.compute.pipeline_dirty = false;
 
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+}
+
+void
+genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+{
+   cmd_buffer_flush_compute_state(cmd_buffer);
 }
 
 static void
@@ -391,6 +397,10 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
 
    uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
 
+   uint64_t push_addr64 = anv_address_physical(
+      anv_state_pool_state_address(&cmd_buffer->device->general_state_pool,
+                                   comp_state->base.push_constants_state));
+
    struct GENX(COMPUTE_WALKER_BODY) body =  {
       .SIMDSize                 = dispatch_size,
       /* HSD 14016252163: Use of Morton walk order (and batching using a batch
@@ -405,8 +415,6 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                                                             TG_BATCH_1,
 #endif
       .MessageSIMD              = dispatch_size,
-      .IndirectDataStartAddress = comp_state->base.push_constants_state.offset,
-      .IndirectDataLength       = comp_state->base.push_constants_state.alloc_size,
       .GenerateLocalID          = prog_data->generate_local_id != 0,
       .EmitLocal                = prog_data->generate_local_id,
       .WalkOrder                = prog_data->walk_order,
@@ -422,6 +430,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                                        &dispatch),
       .EmitInlineParameter      = prog_data->uses_inline_data,
       .InlineData               = {
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 0]   = push_addr64 & 0xffffffff,
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 1]   = push_addr64 >> 32,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = UINT32_MAX,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = indirect_addr64 & 0xffffffff,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = indirect_addr64 >> 32,
@@ -466,11 +476,13 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       num_workgroup_data[2] = groupCountZ;
    }
 
+   uint64_t push_addr64 = anv_address_physical(
+      anv_state_pool_state_address(&cmd_buffer->device->general_state_pool,
+                                   comp_state->base.push_constants_state));
+
    struct GENX(COMPUTE_WALKER_BODY) body = {
       .SIMDSize                       = dispatch.simd_size / 16,
       .MessageSIMD                    = dispatch.simd_size / 16,
-      .IndirectDataStartAddress       = comp_state->base.push_constants_state.offset,
-      .IndirectDataLength             = comp_state->base.push_constants_state.alloc_size,
       .GenerateLocalID                = prog_data->generate_local_id != 0,
       .EmitLocal                      = prog_data->generate_local_id,
       .WalkOrder                      = prog_data->walk_order,
@@ -491,6 +503,8 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                                        prog_data, &dispatch),
       .EmitInlineParameter            = prog_data->uses_inline_data,
       .InlineData                     = {
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 0]   = push_addr64 & 0xffffffff,
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 1]   = push_addr64 >> 32,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = num_workgroup_data[0],
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = num_workgroup_data[1],
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = num_workgroup_data[2],
@@ -554,7 +568,17 @@ emit_cs_walker(struct anv_cmd_buffer *cmd_buffer,
                uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ,
                bool is_unaligned_size_x)
 {
+   struct anv_device *device = cmd_buffer->device;
+   struct anv_instance *instance = device->physical->instance;
    bool is_indirect = !anv_address_is_null(indirect_addr);
+
+   struct mi_builder b;
+   if (unlikely(instance->debug & ANV_DEBUG_SHADER_HASH)) {
+      mi_builder_init(&b, device->info, &cmd_buffer->batch);
+      mi_builder_set_mocs(&b, isl_mocs(&device->isl_dev, 0, false));
+      mi_store(&b, mi_mem32(device->workaround_address),
+                   mi_imm(prog_data->base.source_hash));
+   }
 
 #if GFX_VERx10 >= 125
    /* For unaligned dispatch, we need to tweak the dispatch value with
@@ -612,10 +636,9 @@ void genX(CmdDispatchBase)(
                         prog_data->local_size[0] * prog_data->local_size[1] *
                         prog_data->local_size[2]);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute(&cmd_buffer->trace);
+   trace_intel_begin_compute(&cmd_buffer->trace);
 
-   genX(cmd_buffer_flush_compute_state)(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer);
 
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
@@ -625,11 +648,9 @@ void genX(CmdDispatchBase)(
                   groupCountX, groupCountY, groupCountZ,
                   false);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute(&cmd_buffer->trace,
-                              groupCountX, groupCountY, groupCountZ,
-                              pipeline->source_hash);
-   }
+   trace_intel_end_compute(&cmd_buffer->trace,
+                           groupCountX, groupCountY, groupCountZ,
+                           prog_data->base.source_hash);
 }
 
 static void
@@ -672,8 +693,7 @@ emit_unaligned_cs_walker(
                         prog_data->local_size[0] * prog_data->local_size[1] *
                         prog_data->local_size[2]);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute(&cmd_buffer->trace);
+   trace_intel_begin_compute(&cmd_buffer->trace);
 
    assert(!prog_data->uses_num_work_groups);
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
@@ -686,11 +706,9 @@ emit_unaligned_cs_walker(
                        dispatch, groupCountX, groupCountY, groupCountZ);
 #endif
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute(&cmd_buffer->trace,
-                              groupCountX, groupCountY, groupCountZ,
-                              pipeline->source_hash);
-   }
+   trace_intel_end_compute(&cmd_buffer->trace,
+                           groupCountX, groupCountY, groupCountZ,
+                           prog_data->base.source_hash);
 }
 
 /*
@@ -781,10 +799,9 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
                         "compute indirect",
                         0);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute_indirect(&cmd_buffer->trace);
+   trace_intel_begin_compute_indirect(&cmd_buffer->trace);
 
-   genX(cmd_buffer_flush_compute_state)(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer);
 
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
@@ -792,11 +809,9 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
    emit_cs_walker(cmd_buffer, pipeline, prog_data, dispatch, indirect_addr, 0,
                   0, 0, is_unaligned_size_x);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute_indirect(&cmd_buffer->trace,
-                                       anv_address_utrace(indirect_addr),
-                                       pipeline->source_hash);
-   }
+   trace_intel_end_compute_indirect(&cmd_buffer->trace,
+                                    anv_address_utrace(indirect_addr),
+                                    prog_data->base.source_hash);
 }
 
 void genX(CmdDispatchIndirect)(
@@ -1031,8 +1046,13 @@ cmd_buffer_emit_rt_dispatch_globals(struct anv_cmd_buffer *cmd_buffer,
          .bo = rt->scratch.bo,
          .offset = rt->scratch.layout.ray_stack_start,
       },
+#if GFX_VERx10 == 300
+      .CallStackHandler   = anv_shader_bin_get_handler(
+         cmd_buffer->device->rt_trivial_return, 0),
+#else
       .CallStackHandler   = anv_shader_bin_get_bsr(
          cmd_buffer->device->rt_trivial_return, 0),
+#endif
       .AsyncRTStackSize   = rt->scratch.layout.ray_stack_stride / 64,
       .NumDSSRTStacks     = rt->scratch.layout.stack_ids_per_dss,
       .MaxBVHLevels       = BRW_RT_MAX_BVH_LEVELS,
@@ -1079,8 +1099,13 @@ cmd_buffer_emit_rt_dispatch_globals_indirect(struct anv_cmd_buffer *cmd_buffer,
          .bo = rt->scratch.bo,
          .offset = rt->scratch.layout.ray_stack_start,
       },
+#if GFX_VERx10 == 300
+      .CallStackHandler   = anv_shader_bin_get_handler(
+         cmd_buffer->device->rt_trivial_return, 0),
+#else
       .CallStackHandler   = anv_shader_bin_get_bsr(
          cmd_buffer->device->rt_trivial_return, 0),
+#endif
       .AsyncRTStackSize   = rt->scratch.layout.ray_stack_stride / 64,
       .NumDSSRTStacks     = rt->scratch.layout.stack_ids_per_dss,
       .MaxBVHLevels       = BRW_RT_MAX_BVH_LEVELS,
@@ -1149,6 +1174,9 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
    struct anv_cmd_ray_tracing_state *rt = &cmd_buffer->state.rt;
    struct anv_ray_tracing_pipeline *pipeline =
       anv_pipeline_to_ray_tracing(rt->base.pipeline);
+
+   if (INTEL_DEBUG(DEBUG_RT_NO_TRACE))
+      return;
 
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;

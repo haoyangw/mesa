@@ -36,6 +36,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "util/half_float.h"
 #include "util/list.h"
+#include "util/shader_stats.h"
 #include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "util/u_math.h"
@@ -49,6 +50,7 @@
 #include "midgard_quirks.h"
 
 #include "disassemble.h"
+#include "shader_enums.h"
 
 static const struct debug_named_value midgard_debug_options[] = {
    {"shaders", MIDGARD_DBG_SHADERS, "Dump shaders in NIR and MIR"},
@@ -368,10 +370,30 @@ lower_vec816_alu(const nir_instr *instr, const void *cb_data)
   return 4;
 }
 
+static bool
+lower_halt_to_return(nir_builder *b, nir_instr *instr, UNUSED void *_data)
+{
+   if (instr->type != nir_instr_type_jump)
+      return false;
+
+   nir_jump_instr *jump = nir_instr_as_jump(instr);
+   if (jump->type != nir_jump_halt)
+      return false;
+
+   assert(b->impl == nir_shader_get_entrypoint(b->shader));
+   jump->type = nir_jump_return;
+   return true;
+}
+
 void
 midgard_preprocess_nir(nir_shader *nir, unsigned gpu_id)
 {
    unsigned quirks = midgard_get_quirks(gpu_id);
+
+   /* Ensure that halt are translated to returns and get ride of them */
+   NIR_PASS(_, nir, nir_shader_instructions_pass, lower_halt_to_return,
+            nir_metadata_all, NULL);
+   NIR_PASS(_, nir, nir_lower_returns);
 
    /* Lower gl_Position pre-optimisation, but after lowering vars to ssa
     * (so we don't accidentally duplicate the epilogue since mesa/st has
@@ -442,7 +464,7 @@ midgard_preprocess_nir(nir_shader *nir, unsigned gpu_id)
    };
 
    NIR_PASS(_, nir, nir_lower_tex, &lower_tex_options);
-   NIR_PASS(_, nir, nir_lower_image_atomics_to_global);
+   NIR_PASS(_, nir, nir_lower_image_atomics_to_global, NULL, NULL);
 
    /* TEX_GRAD fails to apply sampler descriptor settings on some
     * implementations, requiring a lowering.
@@ -484,7 +506,12 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 64,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_undef);
@@ -2986,7 +3013,7 @@ midgard_compile_shader_nir(nir_shader *nir,
 
    /* Collect varyings after lowering I/O */
    info->quirk_no_auto32 = (ctx->quirks & MIDGARD_NO_AUTO32);
-   pan_nir_collect_varyings(nir, info);
+   pan_nir_collect_varyings(nir, info, PAN_MEDIUMP_VARY_SMOOTH_16BIT);
 
    /* Optimisation passes */
    optimise_nir(nir, ctx->quirks, inputs->is_blend);
@@ -3132,51 +3159,34 @@ midgard_compile_shader_nir(nir_shader *nir,
    if (binary->size)
       memset(util_dynarray_grow(binary, uint8_t, 16), 0, 16);
 
-   if ((midgard_debug & MIDGARD_DBG_SHADERDB || inputs->debug) &&
-       !nir->info.internal) {
-      unsigned nr_bundles = 0, nr_ins = 0;
+   struct midgard_stats stats = {
+      .quadwords = ctx->quadword_count,
+      .registers = info->work_reg_count,
+      .loops = ctx->loop_count,
+      .spills = ctx->spills,
+      .fills = ctx->fills,
+   };
 
-      /* Count instructions and bundles */
+   /* Count instructions and bundles */
+   mir_foreach_block(ctx, _block) {
+      midgard_block *block = (midgard_block *)_block;
+      stats.bundles +=
+         util_dynarray_num_elements(&block->bundles, midgard_bundle);
 
-      mir_foreach_block(ctx, _block) {
-         midgard_block *block = (midgard_block *)_block;
-         nr_bundles +=
-            util_dynarray_num_elements(&block->bundles, midgard_bundle);
+      mir_foreach_bundle_in_block(block, bun)
+         stats.inst += bun->instruction_count;
+   }
 
-         mir_foreach_bundle_in_block(block, bun)
-            nr_ins += bun->instruction_count;
-      }
+   /* Calculate thread count. There are certain cutoffs by
+    * register count for thread count */
+   stats.threads = (stats.registers <= 4) ? 4 : (stats.registers <= 8) ? 2 : 1;
 
-      /* Calculate thread count. There are certain cutoffs by
-       * register count for thread count */
+   info->stats.isa = PANFROST_STAT_MIDGARD;
+   info->stats.midgard = stats;
 
-      unsigned nr_registers = info->work_reg_count;
-
-      unsigned nr_threads = (nr_registers <= 4)   ? 4
-                            : (nr_registers <= 8) ? 2
-                                                  : 1;
-
-      char *shaderdb = NULL;
-
-      /* Dump stats */
-
-      asprintf(&shaderdb,
-               "%s shader: "
-               "%u inst, %u bundles, %u quadwords, "
-               "%u registers, %u threads, %u loops, "
-               "%u:%u spills:fills",
-               ctx->inputs->is_blend ? "PAN_SHADER_BLEND"
-                                     : gl_shader_stage_name(ctx->stage),
-               nr_ins, nr_bundles, ctx->quadword_count, nr_registers,
-               nr_threads, ctx->loop_count, ctx->spills, ctx->fills);
-
-      if (midgard_debug & MIDGARD_DBG_SHADERDB)
-         fprintf(stderr, "SHADER-DB: %s\n", shaderdb);
-
-      if (inputs->debug)
-         util_debug_message(inputs->debug, SHADER_INFO, "%s", shaderdb);
-
-      free(shaderdb);
+   if ((midgard_debug & MIDGARD_DBG_SHADERDB) && !nir->info.internal) {
+      const char *prefix = _mesa_shader_stage_to_abbrev(ctx->stage);
+      midgard_stats_fprintf(stderr, prefix, &stats);
    }
 
    _mesa_hash_table_u64_destroy(ctx->ssa_constants);

@@ -36,6 +36,7 @@
 #include "pipe/p_screen.h"
 #include "util/u_atomic.h"
 #include "util/u_upload_mgr.h"
+#include "compiler/brw_disasm.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "intel/compiler/brw_compiler.h"
@@ -217,6 +218,19 @@ iris_upload_shader(struct iris_screen *screen,
       struct keybox *keybox = make_keybox(shader, cache_id, key, key_size);
       _mesa_hash_table_insert(driver_shaders, keybox, shader);
    }
+
+   if (INTEL_DEBUG(DEBUG_SHADERS_LINENO) && screen->brw) {
+      int start = 0;
+      /* dump each simd variant of shader */
+      while (start < shader->brw_prog_data->program_size) {
+         brw_disassemble_with_lineno(&screen->brw->isa, shader->stage, -1,
+                                    ish ? ish->source_hash : 0, assembly, start,
+                                    res->bo->address + shader->assembly.offset,
+                                    stderr);
+         start += align64(brw_disassemble_find_end(&screen->brw->isa,
+                                                   assembly, start), 64);
+      }
+   }
 }
 
 bool
@@ -281,7 +295,7 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
 #endif
    }
 
-   iris_finalize_program(shader, NULL, NULL, 0, 0, 0, &bt);
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
 
    iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
                       ice->shaders.uploader_driver,
@@ -338,26 +352,6 @@ iris_destroy_program_cache(struct iris_context *ice)
    ralloc_free(ice->shaders.cache);
 }
 
-static void
-link_libintel_shaders(nir_shader *nir,
-                      const uint32_t *spv_code, uint32_t spv_size)
-{
-   nir_shader *libintel = brw_nir_from_spirv(nir, spv_code, spv_size);
-
-   nir_link_shader_functions(nir, libintel);
-   NIR_PASS_V(nir, nir_inline_functions);
-   NIR_PASS_V(nir, nir_remove_non_entrypoints);
-   NIR_PASS_V(nir, nir_lower_vars_to_explicit_types, nir_var_function_temp,
-              glsl_get_cl_type_size_align);
-   NIR_PASS_V(nir, nir_opt_deref);
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
-   NIR_PASS_V(nir, nir_lower_explicit_io,
-              nir_var_shader_temp | nir_var_function_temp | nir_var_mem_shared |
-                 nir_var_mem_global,
-              nir_address_format_62bit_generic);
-   NIR_PASS_V(nir, nir_lower_scratch_to_var);
-}
-
 void
 iris_ensure_indirect_generation_shader(struct iris_batch *batch)
 {
@@ -389,17 +383,16 @@ iris_ensure_indirect_generation_shader(struct iris_batch *batch)
    uint32_t uniform_size =
       screen->vtbl.call_generation_shader(screen, &b);
 
-   uint32_t spv_size;
-   const uint32_t *spv_code = screen->vtbl.load_shader_lib_spv(&spv_size);
-
    nir_shader *nir = b.shader;
-
-   link_libintel_shaders(nir, spv_code, spv_size);
 
    NIR_PASS_V(nir, nir_lower_vars_to_ssa);
    NIR_PASS_V(nir, nir_opt_cse);
    NIR_PASS_V(nir, nir_opt_gcm, true);
-   NIR_PASS_V(nir, nir_opt_peephole_select, 1, false, false);
+
+   nir_opt_peephole_select_options peephole_select_options = {
+      .limit = 1,
+   };
+   NIR_PASS_V(nir, nir_opt_peephole_select, &peephole_select_options);
 
    NIR_PASS_V(nir, nir_lower_variable_initializers, ~0);
 
@@ -515,7 +508,7 @@ iris_ensure_indirect_generation_shader(struct iris_batch *batch)
    struct iris_binding_table bt;
    memset(&bt, 0, sizeof(bt));
 
-   iris_finalize_program(shader, NULL, NULL, 0, 0, 0, &bt);
+   iris_finalize_program(shader, NULL, NULL, 0, 0, &bt);
 
    iris_upload_shader(screen, NULL, shader, ice->shaders.cache,
                       ice->shaders.uploader_driver,

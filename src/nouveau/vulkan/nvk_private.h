@@ -35,6 +35,9 @@
 /* Max size of a bound cbuf */
 #define NVK_MAX_CBUF_SIZE (1u << 16)
 
+#define NVK_MAX_IMAGE_PLANES 3
+#define NVK_MAX_SAMPLER_PLANES 2
+
 /* Device Generated Commands */
 #define NVK_DGC_ALIGN 0x100
 

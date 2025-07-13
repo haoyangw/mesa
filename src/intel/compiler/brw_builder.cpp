@@ -133,7 +133,7 @@ brw_builder::shuffle_from_32bit_read(const brw_reg &dst,
 brw_reg
 brw_sample_mask_reg(const brw_builder &bld)
 {
-   const fs_visitor &s = *bld.shader;
+   const brw_shader &s = *bld.shader;
 
    if (s.stage != MESA_SHADER_FRAGMENT) {
       return brw_imm_ud(0xffffffff);
@@ -152,13 +152,13 @@ brw_sample_mask_reg(const brw_builder &bld)
  * Predicate the specified instruction on the sample mask.
  */
 void
-brw_emit_predicate_on_sample_mask(const brw_builder &bld, fs_inst *inst)
+brw_emit_predicate_on_sample_mask(const brw_builder &bld, brw_inst *inst)
 {
    assert(bld.shader->stage == MESA_SHADER_FRAGMENT &&
           bld.group() == inst->group &&
           bld.dispatch_width() == inst->exec_size);
 
-   const fs_visitor &s = *bld.shader;
+   const brw_shader &s = *bld.shader;
    const brw_reg sample_mask = brw_sample_mask_reg(bld);
    const unsigned subreg = sample_mask_flag_subreg(s);
 
@@ -168,8 +168,8 @@ brw_emit_predicate_on_sample_mask(const brw_builder &bld, fs_inst *inst)
              sample_mask.subnr == brw_flag_subreg(
                 subreg + inst->group / 16).subnr);
    } else {
-      bld.group(1, 0).exec_all()
-         .MOV(brw_flag_subreg(subreg + inst->group / 16), sample_mask);
+      bld.uniform().MOV(brw_flag_subreg(subreg + inst->group / 16),
+                        sample_mask);
    }
 
    if (inst->predicate) {
@@ -248,9 +248,9 @@ brw_check_dynamic_msaa_flag(const brw_builder &bld,
                         const struct brw_wm_prog_data *wm_prog_data,
                         enum intel_msaa_flags flag)
 {
-   fs_inst *inst = bld.AND(bld.null_reg_ud(),
-                           brw_dynamic_msaa_flags(wm_prog_data),
-                           brw_imm_ud(flag));
+   brw_inst *inst = bld.AND(bld.null_reg_ud(),
+                            brw_dynamic_msaa_flags(wm_prog_data),
+                            brw_imm_ud(flag));
    inst->conditional_mod = BRW_CONDITIONAL_NZ;
 }
 

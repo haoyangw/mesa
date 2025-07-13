@@ -5968,6 +5968,93 @@
       "version" : "None"
     },
     {
+      "opname" : "OpTypeCooperativeVectorNV",
+      "class"  : "Type-Declaration",
+      "opcode" : 5288,
+      "operands" : [
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",        "name" : "'Component Type'" },
+        { "kind" : "IdRef",        "name" : "'Component Count'" }
+      ],
+      "capabilities" : [ "CooperativeVectorNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorMatrixMulNV",
+      "class"  : "Reserved",
+      "opcode" : 5289,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",             "name" : "'Input'" },
+        { "kind" : "IdRef",             "name" : "'InputInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'Matrix'" },
+        { "kind" : "IdRef",             "name" : "'MatrixOffset'" },
+        { "kind" : "IdRef",             "name" : "'MatrixInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'M'" },
+        { "kind" : "IdRef",             "name" : "'K'" },
+        { "kind" : "IdRef",             "name" : "'MemoryLayout'" },
+        { "kind" : "IdRef",             "name" : "'Transpose'" },
+        { "kind" : "IdRef",             "name" : "'MatrixStride'", "quantifier": "?" },
+        { "kind" : "CooperativeMatrixOperands",             "quantifier" : "?" }
+      ],
+      "capabilities" : [ "CooperativeVectorNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorOuterProductAccumulateNV",
+      "class"  : "Reserved",
+      "opcode" : 5290,
+      "operands" : [
+        { "kind" : "IdRef",             "name" : "'Pointer'" },
+        { "kind" : "IdRef",             "name" : "'Offset'" },
+        { "kind" : "IdRef",             "name" : "'A'" },
+        { "kind" : "IdRef",             "name" : "'B'" },
+        { "kind" : "IdRef",             "name" : "'MemoryLayout'" },
+        { "kind" : "IdRef",             "name" : "'MatrixInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'MatrixStride'", "quantifier": "?" }
+      ],
+      "capabilities" : [ "CooperativeVectorTrainingNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorReduceSumAccumulateNV",
+      "class"  : "Reserved",
+      "opcode" : 5291,
+      "operands" : [
+        { "kind" : "IdRef",             "name" : "'Pointer'" },
+        { "kind" : "IdRef",             "name" : "'Offset'" },
+        { "kind" : "IdRef",             "name" : "'V'" }
+      ],
+      "capabilities" : [ "CooperativeVectorTrainingNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorMatrixMulAddNV",
+      "class"  : "Reserved",
+      "opcode" : 5292,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",             "name" : "'Input'" },
+        { "kind" : "IdRef",             "name" : "'InputInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'Matrix'" },
+        { "kind" : "IdRef",             "name" : "'MatrixOffset'" },
+        { "kind" : "IdRef",             "name" : "'MatrixInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'Bias'" },
+        { "kind" : "IdRef",             "name" : "'BiasOffset'" },
+        { "kind" : "IdRef",             "name" : "'BiasInterpretation'" },
+        { "kind" : "IdRef",             "name" : "'M'" },
+        { "kind" : "IdRef",             "name" : "'K'" },
+        { "kind" : "IdRef",             "name" : "'MemoryLayout'" },
+        { "kind" : "IdRef",             "name" : "'Transpose'" },
+        { "kind" : "IdRef",             "name" : "'MatrixStride'", "quantifier": "?" },
+        { "kind" : "CooperativeMatrixOperands",             "quantifier" : "?" }
+      ],
+      "capabilities" : [ "CooperativeVectorNV" ],
+      "version" : "None"
+    },
+    {
       "opname" : "OpCooperativeMatrixConvertNV",
       "class"  : "Conversion",
       "opcode" : 5293,
@@ -6058,6 +6145,33 @@
         { "kind" : "IdRef", "name" : "'Barycentric'" }
       ],
       "capabilities" : [ "DisplacementMicromapNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorLoadNV",
+      "class"  : "Memory",
+      "opcode" : 5302,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",             "name" : "'Pointer'" },
+        { "kind" : "IdRef",             "name" : "'Offset'" },
+        { "kind" : "MemoryAccess",      "quantifier" : "?" }
+      ],
+      "capabilities" : [ "CooperativeVectorNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpCooperativeVectorStoreNV",
+      "class"  : "Memory",
+      "opcode" : 5303,
+      "operands" : [
+        { "kind" : "IdRef",             "name" : "'Pointer'" },
+        { "kind" : "IdRef",             "name" : "'Offset'" },
+        { "kind" : "IdRef",             "name" : "'Object'" },
+        { "kind" : "MemoryAccess",      "quantifier" : "?" }
+      ],
+      "capabilities" : [ "CooperativeVectorNV" ],
       "version" : "None"
     },
     {
@@ -6201,6 +6315,37 @@
       ],
       "capabilities" : [ "RayTracingNV" ],
       "extensions" : [ "SPV_NV_ray_tracing" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpRayQueryGetClusterIdNV",
+      "class" : "Reserved",
+      "opcode" : 5345,
+      "operands" : [
+          { "kind" : "IdResultType" },
+          { "kind" : "IdResult" },
+          {
+              "kind" : "IdRef",
+              "name" : "'RayQuery'"
+          },
+          {
+              "kind" : "IdRef",
+              "name" : "'Intersection'"
+          }
+      ],
+      "capabilities" : [ "RayTracingClusterAccelerationStructureNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectGetClusterIdNV",
+      "class" : "Reserved",
+      "opcode" : 5346,
+      "operands" : [
+          { "kind" : "IdResultType" },
+          { "kind" : "IdResult" },
+          { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingClusterAccelerationStructureNV" ],
       "version" : "None"
     },
     {
@@ -6645,6 +6790,211 @@
       "version" : "None"
     },
     {
+        "opname" : "OpRayQueryGetIntersectionSpherePositionNV",
+        "class" : "Reserved",
+        "opcode" : 5427,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryGetIntersectionSphereRadiusNV",
+        "class" : "Reserved",
+        "opcode" : 5428,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryGetIntersectionLSSPositionsNV",
+        "class" : "Reserved",
+        "opcode" : 5429,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryGetIntersectionLSSRadiiNV",
+        "class" : "Reserved",
+        "opcode" : 5430,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV"],
+        "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryGetIntersectionLSSHitValueNV",
+        "class" : "Reserved",
+        "opcode" : 5431,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectGetSpherePositionNV",
+      "class"  : "Reserved",
+      "opcode" : 5432,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectGetSphereRadiusNV",
+      "class"  : "Reserved",
+      "opcode" : 5433,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectGetLSSPositionsNV",
+      "class"  : "Reserved",
+      "opcode" : 5434,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectGetLSSRadiiNV",
+      "class"  : "Reserved",
+      "opcode" : 5435,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectIsSphereHitNV",
+      "class"  : "Reserved",
+      "opcode" : 5436,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpHitObjectIsLSSHitNV",
+      "class"  : "Reserved",
+      "opcode" : 5437,
+      "operands" : [
+        { "kind" : "IdResultType"},
+        { "kind" : "IdResult"},
+        { "kind" : "IdRef", "name" : "'Hit Object'" }
+      ],
+      "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+      "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryIsSphereHitNV",
+        "class" : "Reserved",
+        "opcode" : 5438,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
+        "opname" : "OpRayQueryIsLSSHitNV",
+        "class" : "Reserved",
+        "opcode" : 5439,
+        "operands" : [
+            { "kind" : "IdResultType" },
+            { "kind" : "IdResult" },
+            {
+                "kind" : "IdRef",
+                "name" : "'RayQuery'"
+            },
+            {
+                "kind" : "IdRef",
+                "name" : "'Intersection'"
+            }
+        ],
+        "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+        "version" : "None"
+    },
+    {
       "opname" : "OpSubgroupShuffleINTEL",
       "class"  : "Group",
       "opcode" : 5571,
@@ -6986,7 +7336,6 @@
       "class"  : "@exclude",
       "opcode" : 5609,
       "operands" : [
-        { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "LiteralString", "name" : "'Asm target'" }
       ],
@@ -8659,11 +9008,10 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'FromSign'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'MResult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
         { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
@@ -8677,11 +9025,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8694,11 +9042,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
         { "kind" : "LiteralInteger", "name" : "'FromSign'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8711,10 +9059,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'ToSign'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8727,13 +9076,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'MResult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8746,13 +9095,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8765,13 +9114,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8784,13 +9133,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8803,9 +9152,9 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8818,9 +9167,9 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8833,9 +9182,9 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8848,9 +9197,9 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8863,9 +9212,9 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8878,11 +9227,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8895,11 +9244,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8912,11 +9261,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8929,13 +9278,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8948,11 +9297,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8965,11 +9314,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8982,11 +9331,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -8999,11 +9348,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9016,11 +9365,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9033,11 +9382,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9050,11 +9399,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9067,11 +9416,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9084,11 +9433,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9101,11 +9450,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9118,11 +9467,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9135,11 +9484,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9152,11 +9501,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9169,11 +9518,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9186,11 +9535,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9203,11 +9552,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9237,11 +9586,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9254,11 +9603,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9271,11 +9620,11 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9288,13 +9637,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9307,13 +9656,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9326,13 +9675,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'M2'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'Mb'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9345,12 +9694,13 @@
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
         { "kind" : "IdRef", "name" : "'A'" },
-        { "kind" : "LiteralInteger", "name" : "'M1'" },
+        { "kind" : "LiteralInteger", "name" : "'Ma'" },
         { "kind" : "IdRef", "name" : "'B'" },
-        { "kind" : "LiteralInteger", "name" : "'Mout'" },
-        { "kind" : "LiteralInteger", "name" : "'EnableSubnormals'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingMode'" },
-        { "kind" : "LiteralInteger", "name" : "'RoundingAccuracy'" }
+        { "kind" : "LiteralInteger", "name" : "'SignOfB'" },
+        { "kind" : "LiteralInteger", "name" : "'Mresult'" },
+        { "kind" : "LiteralInteger", "name" : "'Subnormal'" },
+        { "kind" : "LiteralInteger", "name" : "'Rounding'" },
+        { "kind" : "LiteralInteger", "name" : "'Accuracy'" }
       ],
       "capabilities" : [ "ArbitraryPrecisionFloatingPointINTEL" ],
       "version" : "None"
@@ -9410,7 +9760,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9428,7 +9777,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9446,7 +9794,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9464,7 +9811,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9482,7 +9828,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9500,7 +9845,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9518,7 +9862,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9536,7 +9879,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9554,7 +9896,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9572,7 +9913,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -9590,7 +9930,6 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef", "name" : "'Input Type'" },
         { "kind" : "IdRef", "name" : "'Input'" },
         { "kind" : "LiteralInteger", "name" : "'S'" },
         { "kind" : "LiteralInteger", "name" : "'I'" },
@@ -10114,10 +10453,69 @@
       "operands" : [
         { "kind" : "IdResultType" },
         { "kind" : "IdResult" },
-        { "kind" : "IdRef",          "name" : "'Target '" }
+        { "kind" : "IdRef",          "name" : "'Target'" }
       ],
       "capabilities" : [ "ArithmeticFenceEXT" ],
       "version" : "None"
+    },
+    {
+      "opname" : "OpTaskSequenceCreateINTEL",
+      "class"  : "Reserved",
+      "opcode" : 6163,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",          "name" : "'Function'" },
+        { "kind" : "LiteralInteger",  "name" : "'Pipelined'" },
+        { "kind" : "LiteralInteger",  "name" : "'UseStallEnableClusters'" },
+        { "kind" : "LiteralInteger",  "name" : "'GetCapacity'" },
+        { "kind" : "LiteralInteger",  "name" : "'AsyncCapacity'" }
+      ],
+      "capabilities" : [ "TaskSequenceINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpTaskSequenceAsyncINTEL",
+      "class"  : "Reserved",
+      "opcode" : 6164,
+      "operands" : [
+        { "kind" : "IdRef",          "name" : "'Sequence'" },
+        { "kind" : "IdRef", "quantifier" : "*",  "name" : "'Arguments'" }
+      ],
+      "capabilities" : [ "TaskSequenceINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpTaskSequenceGetINTEL",
+      "class"  : "Reserved",
+      "opcode" : 6165,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",          "name" : "'Sequence'" }
+      ],
+      "capabilities" : [ "TaskSequenceINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpTaskSequenceReleaseINTEL",
+      "class"  : "Reserved",
+      "opcode" : 6166,
+      "operands" : [
+        { "kind" : "IdRef",          "name" : "'Sequence'" }
+      ],
+      "capabilities" : [ "TaskSequenceINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpTypeTaskSequenceINTEL",
+      "class"  : "Type-Declaration",
+      "opcode" : 6199,
+      "operands" : [
+        { "kind" : "IdResult" }
+      ],
+      "capabilities" : [ "TaskSequenceINTEL" ],
+      "version": "None"
     },
     {
       "opname" : "OpSubgroupBlockPrefetchINTEL",
@@ -10129,6 +10527,116 @@
         { "kind" : "MemoryAccess", "quantifier" : "?" }
       ],
       "capabilities" : [ "SubgroupBufferPrefetchINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroup2DBlockLoadINTEL",
+      "class"  : "Group",
+      "opcode" : 6231,
+      "operands" : [
+        { "kind" : "IdRef", "name" : "'Element Size'" },
+        { "kind" : "IdRef", "name" : "'Block Width'" },
+        { "kind" : "IdRef", "name" : "'Block Height'" },
+        { "kind" : "IdRef", "name" : "'Block Count'" },
+        { "kind" : "IdRef", "name" : "'Src Base Pointer'" },
+        { "kind" : "IdRef", "name" : "'Memory Width'" },
+        { "kind" : "IdRef", "name" : "'Memory Height'" },
+        { "kind" : "IdRef", "name" : "'Memory Pitch'" },
+        { "kind" : "IdRef", "name" : "'Coordinate'" },
+        { "kind" : "IdRef", "name" : "'Dst Pointer'" }
+      ],
+      "capabilities" : [ "Subgroup2DBlockIOINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroup2DBlockLoadTransformINTEL",
+      "class"  : "Group",
+      "opcode" : 6232,
+      "operands" : [
+        { "kind" : "IdRef", "name" : "'Element Size'" },
+        { "kind" : "IdRef", "name" : "'Block Width'" },
+        { "kind" : "IdRef", "name" : "'Block Height'" },
+        { "kind" : "IdRef", "name" : "'Block Count'" },
+        { "kind" : "IdRef", "name" : "'Src Base Pointer'" },
+        { "kind" : "IdRef", "name" : "'Memory Width'" },
+        { "kind" : "IdRef", "name" : "'Memory Height'" },
+        { "kind" : "IdRef", "name" : "'Memory Pitch'" },
+        { "kind" : "IdRef", "name" : "'Coordinate'" },
+        { "kind" : "IdRef", "name" : "'Dst Pointer'" }
+      ],
+      "capabilities" : [ "Subgroup2DBlockTransformINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroup2DBlockLoadTransposeINTEL",
+      "class"  : "Group",
+      "opcode" : 6233,
+      "operands" : [
+        { "kind" : "IdRef", "name" : "'Element Size'" },
+        { "kind" : "IdRef", "name" : "'Block Width'" },
+        { "kind" : "IdRef", "name" : "'Block Height'" },
+        { "kind" : "IdRef", "name" : "'Block Count'" },
+        { "kind" : "IdRef", "name" : "'Src Base Pointer'" },
+        { "kind" : "IdRef", "name" : "'Memory Width'" },
+        { "kind" : "IdRef", "name" : "'Memory Height'" },
+        { "kind" : "IdRef", "name" : "'Memory Pitch'" },
+        { "kind" : "IdRef", "name" : "'Coordinate'" },
+        { "kind" : "IdRef", "name" : "'Dst Pointer'" }
+      ],
+      "capabilities" : [ "Subgroup2DBlockTransposeINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroup2DBlockPrefetchINTEL",
+      "class"  : "Group",
+      "opcode" : 6234,
+      "operands" : [
+        { "kind" : "IdRef", "name" : "'Element Size'" },
+        { "kind" : "IdRef", "name" : "'Block Width'" },
+        { "kind" : "IdRef", "name" : "'Block Height'" },
+        { "kind" : "IdRef", "name" : "'Block Count'" },
+        { "kind" : "IdRef", "name" : "'Src Base Pointer'" },
+        { "kind" : "IdRef", "name" : "'Memory Width'" },
+        { "kind" : "IdRef", "name" : "'Memory Height'" },
+        { "kind" : "IdRef", "name" : "'Memory Pitch'" },
+        { "kind" : "IdRef", "name" : "'Coordinate'" }
+      ],
+      "capabilities" : [ "Subgroup2DBlockIOINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroup2DBlockStoreINTEL",
+      "class"  : "Group",
+      "opcode" : 6235,
+      "operands" : [
+        { "kind" : "IdRef", "name" : "'Element Size'" },
+        { "kind" : "IdRef", "name" : "'Block Width'" },
+        { "kind" : "IdRef", "name" : "'Block Height'" },
+        { "kind" : "IdRef", "name" : "'Block Count'" },
+        { "kind" : "IdRef", "name" : "'Src Pointer'" },
+        { "kind" : "IdRef", "name" : "'Dst Base Pointer'" },
+        { "kind" : "IdRef", "name" : "'Memory Width'" },
+        { "kind" : "IdRef", "name" : "'Memory Height'" },
+        { "kind" : "IdRef", "name" : "'Memory Pitch'" },
+        { "kind" : "IdRef", "name" : "'Coordinate'" }
+      ],
+      "capabilities" : [ "Subgroup2DBlockIOINTEL" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpSubgroupMatrixMultiplyAccumulateINTEL",
+      "class"  : "Group",
+      "opcode" : 6237,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef", "name" : "'K Dim'" },
+        { "kind" : "IdRef", "name" : "'Matrix A'" },
+        { "kind" : "IdRef", "name" : "'Matrix B'" },
+        { "kind" : "IdRef", "name" : "'Matrix C'" },
+        { "kind" : "MatrixMultiplyAccumulateOperands", "quantifier" : "?" }
+      ],
+      "capabilities" : [ "SubgroupMatrixMultiplyAccumulateINTEL" ],
       "version" : "None"
     },
     {
@@ -10241,6 +10749,18 @@
         { "kind" : "IdRef",          "name" : "'X'" }
       ],
       "capabilities" : [ "GroupUniformArithmeticKHR" ],
+      "version" : "None"
+    },
+    {
+      "opname" : "OpRoundFToTF32INTEL",
+      "class"  : "Conversion",
+      "opcode" : 6426,
+      "operands" : [
+        { "kind" : "IdResultType" },
+        { "kind" : "IdResult" },
+        { "kind" : "IdRef",        "name" : "'Float Value'" }
+      ],
+      "capabilities" : [ "TensorFloat32RoundingINTEL" ],
       "version" : "None"
     },
     {
@@ -10940,6 +11460,7 @@
         },
         {
           "enumerant" : "SkipTrianglesKHR",
+          "aliases" : ["SkipBuiltinPrimitivesNV"],
           "value" : "0x0100",
           "capabilities" : [ "RayTraversalPrimitiveCullingKHR" ],
           "version" : "None"
@@ -11077,6 +11598,11 @@
         {
           "enumerant" : "Zig",
           "value" : 12,
+          "version" : "1.0"
+        },
+        {
+          "enumerant" : "Rust",
+          "value" : 13,
           "version" : "1.0"
         }
       ]
@@ -14888,6 +15414,27 @@
           "version" : "None"
         },
         {
+          "enumerant" : "HitIsSphereNV",
+          "value" : 5359,
+          "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "HitIsLSSNV",
+          "value" : 5360,
+          "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "HitSpherePositionNV",
+          "value" : 5361,
+          "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "WarpsPerSMNV",
           "value" : 5374,
           "capabilities" : [ "ShaderSMBuiltinsNV" ],
@@ -14916,6 +15463,13 @@
           "version" : "None"
         },
         {
+          "enumerant" : "HitLSSPositionsNV",
+          "value" : 5396,
+          "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "HitKindFrontFacingMicroTriangleNV",
           "value" : 5405,
           "capabilities" : [ "RayTracingDisplacementMicromapNV" ],
@@ -14925,6 +15479,27 @@
           "enumerant" : "HitKindBackFacingMicroTriangleNV",
           "value" : 5406,
           "capabilities" : [ "RayTracingDisplacementMicromapNV" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "HitSphereRadiusNV",
+          "value" : 5420,
+          "capabilities" : [ "RayTracingSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "HitLSSRadiiNV",
+          "value" : 5421,
+          "capabilities" : [ "RayTracingLinearSweptSpheresGeometryNV" ],
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "ClusterIDNV",
+          "value" : 5436,
+          "capabilities" : [ "RayTracingClusterAccelerationStructureNV" ],
+          "extensions" : [ "SPV_NV_cluster_acceleration_structure" ],
           "version" : "None"
         },
         {
@@ -15598,6 +16173,7 @@
         {
           "enumerant" : "AtomicStorageOps",
           "value" : 4445,
+          "capabilities" : [ "AtomicStorage" ],
           "extensions" : [ "SPV_KHR_shader_atomic_counter_ops" ],
           "version" : "None"
         },
@@ -15775,6 +16351,26 @@
           "enumerant" : "QuadControlKHR",
           "value" : 5087,
           "extensions" : [ "SPV_KHR_quad_control" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "BFloat16TypeKHR",
+          "value" : 5116,
+          "extensions" : [ "SPV_KHR_bfloat16" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "BFloat16DotProductKHR",
+          "value" : 5117,
+          "capabilities" : [ "BFloat16TypeKHR" ],
+          "extensions" : [ "SPV_KHR_bfloat16" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "BFloat16CooperativeMatrixKHR",
+          "value" : 5118,
+          "capabilities" : [ "BFloat16TypeKHR", "CooperativeMatrixKHR" ],
+          "extensions" : [ "SPV_KHR_bfloat16" ],
           "version" : "None"
         },
         {
@@ -16083,7 +16679,7 @@
         {
           "enumerant" : "RayTracingOpacityMicromapEXT",
           "value" : 5381,
-          "capabilities" : [ "RayQueryKHR","RayTracingKHR" ],
+          "capabilities" : [ "Shader" ],
           "extensions" : [ "SPV_EXT_opacity_micromap" ],
           "version" : "None"
         },
@@ -16108,6 +16704,12 @@
           "version" : "None"
         },
         {
+          "enumerant" : "CooperativeVectorNV",
+          "value" : 5394,
+          "extensions" : [ "SPV_NV_cooperative_vector" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "AtomicFloat16VectorNV",
           "value" : 5404,
           "extensions" : [ "SPV_NV_shader_atomic_fp16_vector" ],
@@ -16124,6 +16726,18 @@
           "enumerant" : "RawAccessChainsNV",
           "value" : 5414,
           "extensions" : [ "SPV_NV_raw_access_chains" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "RayTracingSpheresGeometryNV",
+          "value" : 5418,
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "RayTracingLinearSweptSpheresGeometryNV",
+          "value" : 5419,
+          "extensions" : [ "SPV_NV_linear_swept_spheres" ],
           "version" : "None"
         },
         {
@@ -16154,6 +16768,19 @@
           "enumerant" : "CooperativeMatrixBlockLoadsNV",
           "value" : 5434,
           "extensions" : [ "SPV_NV_cooperative_matrix2" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "CooperativeVectorTrainingNV",
+          "value" : 5435,
+          "extensions" : [ "SPV_NV_cooperative_vector" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "RayTracingClusterAccelerationStructureNV",
+          "value" : 5437,
+          "capabilities" : [ "RayTracingKHR" ],
+          "extensions" : [ "SPV_NV_cluster_acceleration_structure" ],
           "version" : "None"
         },
         {
@@ -16201,7 +16828,6 @@
         {
           "enumerant" : "IntegerFunctions2INTEL",
           "value" : 5584,
-          "capabilities" : [ "Shader" ],
           "extensions" : [ "SPV_INTEL_shader_integer_functions2" ],
           "version" : "None"
         },
@@ -16553,6 +17179,12 @@
           "version" : "None"
         },
         {
+          "enumerant" : "TaskSequenceINTEL",
+          "value" : 6162,
+          "extensions" : [ "SPV_INTEL_task_sequence" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "FPMaxErrorINTEL",
           "value" : 6169,
           "extensions" : [ "SPV_INTEL_fp_max_error" ],
@@ -16589,16 +17221,48 @@
           "version" : "None"
         },
         {
+          "enumerant" : "Subgroup2DBlockIOINTEL",
+          "value" : 6228,
+          "extensions": [ "SPV_INTEL_2d_block_io" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "Subgroup2DBlockTransformINTEL",
+          "value" : 6229,
+          "capabilities" : [ "Subgroup2DBlockIOINTEL" ],
+          "extensions": [ "SPV_INTEL_2d_block_io" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "Subgroup2DBlockTransposeINTEL",
+          "value" : 6230,
+          "capabilities" : [ "Subgroup2DBlockIOINTEL" ],
+          "extensions": [ "SPV_INTEL_2d_block_io" ],
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SubgroupMatrixMultiplyAccumulateINTEL",
+          "value" : 6236,
+          "extensions": [ "SPV_INTEL_subgroup_matrix_multiply_accumulate" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "GroupUniformArithmeticKHR",
           "value" : 6400,
           "extensions" : [ "SPV_KHR_uniform_group_instructions"],
           "version" : "None"
         },
         {
+          "enumerant" : "TensorFloat32RoundingINTEL",
+          "value" : 6425,
+          "extensions" : [ "SPV_INTEL_tensor_float32_conversion" ],
+          "version" : "None"
+        },
+        {
           "enumerant" : "MaskedGatherScatterINTEL",
-	  "value" : 6427,
-	  "extensions" : [ "SPV_INTEL_masked_gather_scatter"],
-	  "version" : "None"
+          "value" : 6427,
+          "extensions" : [ "SPV_INTEL_masked_gather_scatter"],
+          "version" : "None"
         },
         {
           "enumerant" : "CacheControlsINTEL",
@@ -16948,9 +17612,203 @@
       ]
     },
     {
+      "category" : "BitEnum",
+      "kind" : "MatrixMultiplyAccumulateOperands",
+      "enumerants" : [
+        {
+          "enumerant" : "None",
+          "value" : "0x0",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixASignedComponentsINTEL",
+          "value" : "0x1",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBSignedComponentsINTEL",
+          "value" : "0x2",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixCBFloat16INTEL",
+          "value" : "0x4",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixResultBFloat16INTEL",
+          "value" : "0x8",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixAPackedInt8INTEL",
+          "value" : "0x10",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBPackedInt8INTEL",
+          "value" : "0x20",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixAPackedInt4INTEL",
+          "value" : "0x40",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBPackedInt4INTEL",
+          "value" : "0x80",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixATF32INTEL",
+          "value" : "0x100",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBTF32INTEL",
+          "value" : "0x200",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixAPackedFloat16INTEL",
+          "value" : "0x400",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBPackedFloat16INTEL",
+          "value" : "0x800",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixAPackedBFloat16INTEL",
+          "value" : "0x1000",
+          "version" : "None"
+        },
+        {
+          "enumerant" : "MatrixBPackedBFloat16INTEL",
+          "value" : "0x2000",
+          "version" : "None"
+        }
+      ]
+    },
+    {
       "category" : "ValueEnum",
       "kind" : "FPEncoding",
       "enumerants" : [
+        {
+          "enumerant" : "BFloat16KHR",
+          "value" : 0,
+          "capabilities" : [ "BFloat16TypeKHR" ],
+          "version" : "None"
+        }
+      ]
+    },
+    {
+      "category" : "ValueEnum",
+      "kind" : "CooperativeVectorMatrixLayout",
+      "enumerants" : [
+        {
+          "enumerant" : "RowMajorNV",
+          "value" : 0,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "ColumnMajorNV",
+          "value" : 1,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "InferencingOptimalNV",
+          "value" : 2,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "TrainingOptimalNV",
+          "value" : 3,
+          "version" : "None"
+        }
+      ]
+    },
+    {
+      "category" : "ValueEnum",
+      "kind" : "ComponentType",
+      "enumerants" : [
+        {
+          "enumerant" : "Float16NV",
+          "value" : 0,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "Float32NV",
+          "value" : 1,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "Float64NV",
+          "value" : 2,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SignedInt8NV",
+          "value" : 3,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SignedInt16NV",
+          "value" : 4,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SignedInt32NV",
+          "value" : 5,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SignedInt64NV",
+          "value" : 6,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "UnsignedInt8NV",
+          "value" : 7,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "UnsignedInt16NV",
+          "value" : 8,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "UnsignedInt32NV",
+          "value" : 9,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "UnsignedInt64NV",
+          "value" : 10,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "SignedInt8PackedNV",
+          "value" : 1000491000,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "UnsignedInt8PackedNV",
+          "value" : 1000491001,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "FloatE4M3NV",
+          "value" : 1000491002,
+          "version" : "None"
+        },
+        {
+          "enumerant" : "FloatE5M2NV",
+          "value" : 1000491003,
+          "version" : "None"
+        }
       ]
     },
     {

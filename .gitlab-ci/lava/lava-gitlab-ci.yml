@@ -5,6 +5,19 @@ variables:
 .lava-test:
   # Cancel job if a newer commit is pushed to the same branch
   interruptible: true
+  # The jobs themselves shouldn't actually run for an hour, of course.
+  # Jobs are picked up greedily by a GitLab CI runner which is deliberately
+  # overprovisioned compared to the number of available devices. They are
+  # submitted to the LAVA co-ordinator with a job priority which gives
+  # pre-merge priority over everyone else. User-submitted and nightly jobs
+  # can thus spend ages just waiting around in a queue to be run at some
+  # point as they get pre-empted by other things.
+  # Non-queue time has strict timeouts for each stage, e.g. for downloading
+  # the artifacts, booting the device, device setup, running the tests, etc,
+  # which is handled by LAVA itself.
+  # So the only reason we should see anyone bouncing off this timeout is due
+  # to a lack of available devices to run the jobs.
+  timeout: 1h
   variables:
     GIT_STRATEGY: none # testing doesn't build anything from source
     FDO_CI_CONCURRENT: 6 # should be replaced by per-machine definitions
@@ -41,7 +54,7 @@ variables:
   tags:
     - $RUNNER_TAG
   after_script:
-    - curl -L --retry 4 -f --retry-all-errors --retry-delay 60 -s "https://${JOB_RESULTS_PATH}" | tar --warning=no-timestamp --zstd -x
+    - curl -L --retry 4 -f --retry-connrefused --retry-delay 30 -s "https://${JOB_RESULTS_PATH}" | tar --warning=no-timestamp --zstd -x
   needs:
     - !reference [.required-for-hardware-jobs, needs]
     - job: alpine/x86_64_lava_ssh_client
@@ -126,38 +139,31 @@ variables:
   extends:
     - .lava-test:x86_64
 
-.lava-traces-base:
+.lava-piglit-traces:
   variables:
     HWCI_TEST_SCRIPT: "/install/piglit/piglit-traces.sh"
     # until we overcome Infrastructure issues, give traces extra 5 min before timeout
     DEVICE_HANGING_TIMEOUT_SEC: 600
+    PIGLIT_REPLAY_DEVICE_NAME: "gl-${GPU_VERSION}"
+    PIGLIT_RESULTS: "${GPU_VERSION}-replay"
   artifacts:
     reports:
       junit: results/junit.xml
 
-.lava-piglit:
-  variables:
-    PIGLIT_REPLAY_DEVICE_NAME: "gl-${GPU_VERSION}"
-    PIGLIT_RESULTS: "${GPU_VERSION}-${PIGLIT_PROFILES}"
-    HWCI_TEST_SCRIPT: "/install/piglit/piglit-runner.sh"
-
 .lava-piglit-traces:x86_64:
   extends:
     - .lava-test:x86_64
-    - .lava-piglit
-    - .lava-traces-base
+    - .lava-piglit-traces
 
 .lava-piglit-traces:arm32:
   extends:
     - .lava-test:arm32
-    - .lava-piglit
-    - .lava-traces-base
+    - .lava-piglit-traces
 
 .lava-piglit-traces:arm64:
   extends:
     - .lava-test:arm64
-    - .lava-piglit
-    - .lava-traces-base
+    - .lava-piglit-traces
 
 .lava-fluster:
   variables:

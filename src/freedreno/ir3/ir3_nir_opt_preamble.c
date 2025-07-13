@@ -212,6 +212,8 @@ instr_cost(nir_instr *instr, const void *data)
 static float
 rewrite_cost(nir_def *def, const void *data)
 {
+   const struct ir3_shader_variant *v = data;
+
    /* We always have to expand booleans */
    if (def->bit_size == 1)
       return def->num_components;
@@ -219,10 +221,7 @@ rewrite_cost(nir_def *def, const void *data)
    bool mov_needed = false;
    nir_foreach_use (use, def) {
       nir_instr *parent_instr = nir_src_parent_instr(use);
-      if (parent_instr->type != nir_instr_type_alu) {
-         mov_needed = true;
-         break;
-      } else {
+      if (parent_instr->type == nir_instr_type_alu) {
          nir_alu_instr *alu = nir_instr_as_alu(parent_instr);
          if (alu->op == nir_op_vec2 ||
              alu->op == nir_op_vec3 ||
@@ -233,6 +232,23 @@ rewrite_cost(nir_def *def, const void *data)
          } else {
             /* Assume for non-moves that the const is folded into the src */
          }
+      } else if (parent_instr->type == nir_instr_type_intrinsic) {
+         nir_intrinsic_instr *parent_intrin =
+            nir_instr_as_intrinsic(parent_instr);
+
+         if (v->compiler->has_alias_rt && v->type == MESA_SHADER_FRAGMENT &&
+             parent_intrin->intrinsic == nir_intrinsic_store_output &&
+             def->bit_size == 32) {
+            /* For FS outputs, alias.rt can use const registers without a mov.
+             * This only works for full regs though.
+             */
+         } else {
+            mov_needed = true;
+            break;
+         }
+      } else {
+         mov_needed = true;
+         break;
       }
    }
 
@@ -307,6 +323,7 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
       .instr_cost_cb = instr_cost,
       .avoid_instr_cb = avoid_instr,
       .rewrite_cost_cb = rewrite_cost,
+      .cb_data = v,
    };
 
    unsigned size = 0;
@@ -763,12 +780,13 @@ ir3_nir_opt_prefetch_descriptors(nir_shader *nir, struct ir3_shader_variant *v)
    }
 
 finished:
-   nir_metadata_preserve(main, nir_metadata_all);
+   nir_no_progress(main);
+
    if (preamble) {
-      nir_metadata_preserve(preamble,
-                            nir_metadata_block_index |
-                            nir_metadata_dominance);
+      nir_progress(true, preamble,
+                   nir_metadata_block_index | nir_metadata_dominance);
    }
+
    nir_instr_set_destroy(instr_set);
    free(preamble_defs);
    return progress;
@@ -897,6 +915,5 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    exec_node_remove(&main->preamble->node);
    main->preamble = NULL;
 
-   nir_metadata_preserve(main, nir_metadata_none);
-   return true;
+   return nir_progress(true, main, nir_metadata_none);
 }

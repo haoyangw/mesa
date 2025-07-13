@@ -363,7 +363,7 @@ void *amdgpu_bo_map(struct radeon_winsys *rws,
    struct amdgpu_winsys *aws = amdgpu_winsys(rws);
    struct amdgpu_winsys_bo *bo = (struct amdgpu_winsys_bo*)buf;
    struct amdgpu_bo_real *real;
-   struct amdgpu_cs *cs = rcs ? amdgpu_cs(rcs) : NULL;
+   struct amdgpu_cs *acs = rcs ? amdgpu_cs(rcs) : NULL;
 
    assert(bo->type != AMDGPU_BO_SPARSE);
 
@@ -379,9 +379,9 @@ void *amdgpu_bo_map(struct radeon_winsys *rws,
              * (neither one is changing it).
              *
              * Only check whether the buffer is being used for write. */
-            if (cs && amdgpu_bo_is_referenced_by_cs_with_usage(cs, bo,
-                                                               RADEON_USAGE_WRITE)) {
-               cs->flush_cs(cs->flush_data,
+            if (acs && amdgpu_bo_is_referenced_by_cs_with_usage(acs, bo,
+                                                                RADEON_USAGE_WRITE)) {
+               acs->flush_cs(acs->flush_data,
 			    RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
                return NULL;
             }
@@ -391,8 +391,8 @@ void *amdgpu_bo_map(struct radeon_winsys *rws,
                return NULL;
             }
          } else {
-            if (cs && amdgpu_bo_is_referenced_by_cs(cs, bo)) {
-               cs->flush_cs(cs->flush_data,
+            if (acs && amdgpu_bo_is_referenced_by_cs(acs, bo)) {
+               acs->flush_cs(acs->flush_data,
 			    RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
                return NULL;
             }
@@ -413,10 +413,10 @@ void *amdgpu_bo_map(struct radeon_winsys *rws,
              * (neither one is changing it).
              *
              * Only check whether the buffer is being used for write. */
-            if (cs) {
-               if (amdgpu_bo_is_referenced_by_cs_with_usage(cs, bo,
+            if (acs) {
+               if (amdgpu_bo_is_referenced_by_cs_with_usage(acs, bo,
                                                             RADEON_USAGE_WRITE)) {
-                  cs->flush_cs(cs->flush_data,
+                  acs->flush_cs(acs->flush_data,
 			       RADEON_FLUSH_START_NEXT_GFX_IB_NOW, NULL);
                } else {
                   /* Try to avoid busy-waiting in amdgpu_bo_wait. */
@@ -429,9 +429,9 @@ void *amdgpu_bo_map(struct radeon_winsys *rws,
                            RADEON_USAGE_WRITE);
          } else {
             /* Mapping for write. */
-            if (cs) {
-               if (amdgpu_bo_is_referenced_by_cs(cs, bo)) {
-                  cs->flush_cs(cs->flush_data,
+            if (acs) {
+               if (amdgpu_bo_is_referenced_by_cs(acs, bo)) {
+                  acs->flush_cs(acs->flush_data,
 			       RADEON_FLUSH_START_NEXT_GFX_IB_NOW, NULL);
                } else {
                   /* Try to avoid busy-waiting in amdgpu_bo_wait. */
@@ -700,6 +700,7 @@ static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *aws,
    bo->bo = buf_handle;
    bo->va_handle = va_handle;
    bo->kms_handle = kms_handle;
+   bo->vm_always_valid = request.flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
 
    if (initial_domain & RADEON_DOMAIN_VRAM)
       aws->allocated_vram += align64(size, aws->info.gart_page_size);
@@ -1898,6 +1899,13 @@ static bool amdgpu_bo_is_suballocated(struct pb_buffer_lean *buf)
    return bo->type == AMDGPU_BO_SLAB_ENTRY;
 }
 
+static bool amdgpu_bo_has_vm_always_valid(struct pb_buffer_lean *buf)
+{
+   struct amdgpu_winsys_bo *bo = (struct amdgpu_winsys_bo*)buf;
+
+   return get_real_bo(bo)->vm_always_valid;
+}
+
 uint64_t amdgpu_bo_get_va(struct pb_buffer_lean *buf)
 {
    struct amdgpu_winsys_bo *bo = amdgpu_winsys_bo(buf);
@@ -1939,6 +1947,7 @@ void amdgpu_bo_init_functions(struct amdgpu_screen_winsys *sws)
    sws->base.buffer_from_ptr = amdgpu_bo_from_ptr;
    sws->base.buffer_is_user_ptr = amdgpu_bo_is_user_ptr;
    sws->base.buffer_is_suballocated = amdgpu_bo_is_suballocated;
+   sws->base.buffer_has_vm_always_valid = amdgpu_bo_has_vm_always_valid;
    sws->base.buffer_get_handle = amdgpu_bo_get_handle;
    sws->base.buffer_commit = amdgpu_bo_sparse_commit;
    sws->base.buffer_find_next_committed_memory = amdgpu_bo_find_next_committed_memory;

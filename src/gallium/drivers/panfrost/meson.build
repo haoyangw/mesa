@@ -41,18 +41,19 @@ compile_args_panfrost = [
   '-Wno-pointer-arith'
 ]
 
-panfrost_versions = ['4', '5', '6', '7', '9', '10']
+panfrost_versions = ['4', '5', '6', '7', '9', '10', '12', '13']
 libpanfrost_versions = []
 
 foreach ver : panfrost_versions
   files_panfrost_vx = [
     'pan_cmdstream.c',
     'pan_fb_preload.c',
+    'pan_precomp.c',
     pan_packers,
   ]
   if ver in ['4', '5', '6', '7', '9']
     files_panfrost_vx += ['pan_jm.c']
-  elif ver in ['10']
+  elif ver in ['10', '12', '13']
     files_panfrost_vx += ['pan_csf.c']
   endif
   libpanfrost_versions += static_library(
@@ -60,7 +61,7 @@ foreach ver : panfrost_versions
     include_directories : panfrost_includes,
     c_args : ['-DPAN_ARCH=' + ver],
     gnu_symbol_visibility : 'hidden',
-    dependencies : [idep_pan_packers, idep_nir, dep_libdrm, idep_mesautil],
+    dependencies : [idep_pan_packers, idep_nir, dep_libdrm, idep_mesautil, idep_libpan_per_arch[ver]],
 )
 endforeach
 

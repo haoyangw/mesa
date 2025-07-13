@@ -247,7 +247,7 @@ VkResult genX(CreateQueryPool)(
       uint64s_per_slot = 1 + 1; /* availability + length of written bitstream data */
       break;
    default:
-      assert(!"Invalid query type");
+      unreachable("Invalid query type");
    }
 
    if (!vk_multialloc_zalloc2(&ma, &device->vk.alloc, pAllocator,
@@ -301,6 +301,7 @@ VkResult genX(CreateQueryPool)(
                                 ANV_BO_ALLOC_CAPTURE,
                                 0 /* explicit_address */,
                                 &pool->bo);
+   ANV_DMR_BO_ALLOC(&pool->vk.base, pool->bo, result);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -344,7 +345,7 @@ void genX(DestroyQueryPool)(
       return;
 
    ANV_RMV(resource_destroy, device, pool);
-
+   ANV_DMR_BO_FREE(&pool->vk.base, pool->bo);
    anv_device_release_bo(device, pool->bo);
    vk_object_free(&device->vk, pAllocator, pool);
 }
@@ -863,8 +864,7 @@ void genX(CmdResetQueryPool)(
 
       anv_cmd_buffer_fill_area(cmd_buffer,
                                anv_query_address(pool, firstQuery),
-                               queryCount * pool->stride,
-                               0, false);
+                               queryCount * pool->stride, 0);
 
       /* The pending clearing writes are in compute if we're in gpgpu mode on
        * the render engine or on the compute engine.
@@ -2065,10 +2065,17 @@ genX(CmdWriteAccelerationStructuresPropertiesKHR)(
    ANV_FROM_HANDLE(anv_query_pool, pool, queryPool);
 
 #if !ANV_SUPPORT_RT_GRL
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             ANV_PIPE_END_OF_PIPE_SYNC_BIT |
-                             ANV_PIPE_DATA_CACHE_FLUSH_BIT,
-                             "read BVH data using CS");
+   /* L1/L2 caches flushes should have been dealt with by pipeline barriers.
+    * Unfortunately some platforms require L3 flush because CS (reading the
+    * dispatch parameters) is not L3 coherent.
+    */
+   if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(cmd_buffer->device->info)) {
+      anv_add_pending_pipe_bits(cmd_buffer,
+                                ANV_PIPE_END_OF_PIPE_SYNC_BIT |
+                                ANV_PIPE_DATA_CACHE_FLUSH_BIT,
+                                "read BVH data using CS");
+      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+   }
 #endif
 
    if (append_query_clear_flush(

@@ -43,10 +43,13 @@
 #include "util/u_memory.h"
 #include "util/u_prim.h"
 #include "util/u_prim_restart.h"
+#include "util/u_printf.h"
 #include "util/u_surface.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_vbuf.h"
+#include "util/perf/cpu_trace.h"
 
+#include "clc/panfrost_compile.h"
 #include "compiler/nir/nir_serialize.h"
 #include "util/pan_lower_framebuffer.h"
 #include "decode.h"
@@ -61,6 +64,8 @@ panfrost_clear(struct pipe_context *pipe, unsigned buffers,
                const union pipe_color_union *color, double depth,
                unsigned stencil)
 {
+   MESA_TRACE_FUNC();
+
    if (!panfrost_render_condition_check(pan_context(pipe)))
       return;
 
@@ -104,11 +109,13 @@ void
 panfrost_flush(struct pipe_context *pipe, struct pipe_fence_handle **fence,
                unsigned flags)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_context *ctx = pan_context(pipe);
    struct panfrost_device *dev = pan_device(pipe->screen);
 
    /* Submit all pending jobs */
-   panfrost_flush_all_batches(ctx, NULL);
+   panfrost_flush_all_batches(ctx, "Gallium flush");
 
    if (fence) {
       struct pipe_fence_handle *f = panfrost_fence_create(ctx);
@@ -389,7 +396,6 @@ panfrost_set_sampler_views(struct pipe_context *pctx,
                            enum pipe_shader_type shader, unsigned start_slot,
                            unsigned num_views,
                            unsigned unbind_num_trailing_slots,
-                           bool take_ownership,
                            struct pipe_sampler_view **views)
 {
    struct panfrost_context *ctx = pan_context(pctx);
@@ -405,14 +411,8 @@ panfrost_set_sampler_views(struct pipe_context *pctx,
       if (view)
          new_nr = p + 1;
 
-      if (take_ownership) {
-         pipe_sampler_view_reference(
-            (struct pipe_sampler_view **)&ctx->sampler_views[shader][p], NULL);
-         ctx->sampler_views[shader][i] = (struct panfrost_sampler_view *)view;
-      } else {
-         pipe_sampler_view_reference(
-            (struct pipe_sampler_view **)&ctx->sampler_views[shader][p], view);
-      }
+      pipe_sampler_view_reference(
+         (struct pipe_sampler_view **)&ctx->sampler_views[shader][p], view);
    }
 
    for (; i < num_views + unbind_num_trailing_slots; i++) {
@@ -564,6 +564,9 @@ panfrost_destroy(struct pipe_context *pipe)
    struct panfrost_device *dev = pan_device(pipe->screen);
 
    pan_screen(pipe->screen)->vtbl.context_cleanup(panfrost);
+
+   u_printf_destroy(&panfrost->printf.ctx);
+   panfrost_bo_unreference(panfrost->printf.bo);
 
    if (panfrost->writers)
       _mesa_hash_table_destroy(panfrost->writers, NULL);
@@ -1121,6 +1124,14 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ctx->in_sync_fd = -1;
    ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &ctx->in_sync_obj);
    assert(!ret);
+
+   ctx->printf.bo =
+      panfrost_bo_create(dev, LIBPAN_PRINTF_BUFFER_SIZE, 0, "Printf Buffer");
+
+   if (ctx->printf.bo == NULL)
+      goto failed;
+
+   u_printf_init(&ctx->printf.ctx, ctx->printf.bo, ctx->printf.bo->ptr.cpu);
 
    ret = pan_screen(screen)->vtbl.context_init(ctx);
 

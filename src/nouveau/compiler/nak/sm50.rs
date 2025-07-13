@@ -10,6 +10,43 @@ use bitview::*;
 use std::collections::HashMap;
 use std::ops::Range;
 
+pub fn instr_latency(_sm: u8, op: &Op, dst_idx: usize) -> u32 {
+    let file = match op.dsts_as_slice()[dst_idx] {
+        Dst::None => return 0,
+        Dst::SSA(vec) => vec.file().unwrap(),
+        Dst::Reg(reg) => reg.file(),
+    };
+
+    let (gpr_latency, pred_latency) = match op {
+            // Double-precision float ALU
+            Op::DAdd(_)
+            | Op::DFma(_)
+            | Op::DMnMx(_)
+            | Op::DMul(_)
+            | Op::DSetP(_)
+            // Half-precision float ALU
+            | Op::HAdd2(_)
+            | Op::HFma2(_)
+            | Op::HMul2(_)
+            | Op::HSet2(_)
+            | Op::HSetP2(_)
+            | Op::HMnMx2(_) => {
+                (13, 14)
+            }
+            _ => (6, 13)
+    };
+
+    // This is BS and we know it
+    match file {
+        RegFile::GPR => gpr_latency,
+        RegFile::Pred => pred_latency,
+        RegFile::UGPR | RegFile::UPred => panic!("No uniform registers"),
+        RegFile::Bar => 0, // Barriers have a HW scoreboard
+        RegFile::Carry => 6,
+        RegFile::Mem => panic!("Not a register"),
+    }
+}
+
 pub struct ShaderModel50 {
     sm: u8,
 }
@@ -56,6 +93,75 @@ impl ShaderModel for ShaderModel50 {
         false
     }
 
+    fn exec_latency(&self, op: &Op) -> u32 {
+        match op {
+            Op::CCtl(_)
+            | Op::MemBar(_)
+            | Op::Bra(_)
+            | Op::SSy(_)
+            | Op::Sync(_)
+            | Op::Brk(_)
+            | Op::PBk(_)
+            | Op::Cont(_)
+            | Op::PCnt(_)
+            | Op::Exit(_)
+            | Op::Bar(_)
+            | Op::Kill(_)
+            | Op::OutFinal(_) => 13,
+            _ => 1,
+        }
+    }
+
+    fn raw_latency(
+        &self,
+        write: &Op,
+        dst_idx: usize,
+        _read: &Op,
+        _src_idx: usize,
+    ) -> u32 {
+        instr_latency(self.sm, write, dst_idx)
+    }
+
+    fn war_latency(
+        &self,
+        _read: &Op,
+        _src_idx: usize,
+        _write: &Op,
+        _dst_idx: usize,
+    ) -> u32 {
+        // We assume the source gets read in the first 4 cycles.  We don't know
+        // how quickly the write will happen.  This is all a guess.
+        4
+    }
+
+    fn waw_latency(
+        &self,
+        a: &Op,
+        a_dst_idx: usize,
+        _a_has_pred: bool,
+        _b: &Op,
+        _b_dst_idx: usize,
+    ) -> u32 {
+        // We know our latencies are wrong so assume the wrote could happen
+        // anywhere between 0 and instr_latency(a) cycles
+        instr_latency(self.sm, a, a_dst_idx)
+    }
+
+    fn paw_latency(&self, write: &Op, _dst_idx: usize) -> u32 {
+        if self.sm == 70 {
+            match write {
+                Op::DSetP(_) | Op::HSetP2(_) => 15,
+                _ => 13,
+            }
+        } else {
+            13
+        }
+    }
+
+    fn worst_latency(&self, write: &Op, dst_idx: usize) -> u32 {
+        instr_latency(self.sm, write, dst_idx)
+    }
+
     fn legalize_op(&self, b: &mut LegalizeBuilder, op: &mut Op) {
         as_sm50_op_mut(op).legalize(b);
     }
@@ -100,6 +206,14 @@ impl SetFieldU64 for SM50Encoder<'_> {
     }
 }
 
+fn zero_reg() -> RegRef {
+    RegRef::new(RegFile::GPR, 255, 1)
+}
+
+fn true_reg() -> RegRef {
+    RegRef::new(RegFile::Pred, 7, 1)
+}
+
 impl SM50Encoder<'_> {
     fn set_opcode(&mut self, opcode: u16) {
         self.set_field(48..64, opcode);
@@ -118,7 +232,7 @@ impl SM50Encoder<'_> {
         self.set_pred_reg(
             16..19,
             match pred.pred_ref {
-                PredRef::None => RegRef::zero(RegFile::Pred, 1),
+                PredRef::None => true_reg(),
                 PredRef::Reg(reg) => reg,
                 PredRef::SSA(_) => panic!("SSA values must be lowered"),
             },
@@ -145,14 +259,14 @@ impl SM50Encoder<'_> {
 
     fn set_reg_src_ref(&mut self, range: Range<usize>, src_ref: SrcRef) {
         match src_ref {
-            SrcRef::Zero => self.set_reg(range, RegRef::zero(RegFile::GPR, 1)),
+            SrcRef::Zero => self.set_reg(range, zero_reg()),
             SrcRef::Reg(reg) => self.set_reg(range, reg),
             _ => panic!("Not a register"),
         }
     }
 
     fn set_reg_src(&mut self, range: Range<usize>, src: Src) {
-        assert!(src.src_mod.is_none());
+        assert!(src.is_unmodified());
         self.set_reg_src_ref(range, src.src_ref);
     }
 
@@ -191,7 +305,7 @@ impl SM50Encoder<'_> {
     fn set_pred_dst(&mut self, range: Range<usize>, dst: Dst) {
         match dst {
             Dst::None => {
-                self.set_pred_reg(range, RegRef::zero(RegFile::Pred, 1));
+                self.set_pred_reg(range, true_reg());
             }
             Dst::Reg(reg) => self.set_pred_reg(range, reg),
             _ => panic!("Not a register"),
@@ -199,12 +313,9 @@ impl SM50Encoder<'_> {
     }
 
     fn set_pred_src(&mut self, range: Range<usize>, not_bit: usize, src: Src) {
-        // The default for predicates is true
-        let true_reg = RegRef::new(RegFile::Pred, 7, 1);
-
         let (not, reg) = match src.src_ref {
-            SrcRef::True => (false, true_reg),
-            SrcRef::False => (true, true_reg),
+            SrcRef::True => (false, true_reg()),
+            SrcRef::False => (true, true_reg()),
             SrcRef::Reg(reg) => (false, reg),
             _ => panic!("Not a register"),
         };
@@ -214,7 +325,7 @@ impl SM50Encoder<'_> {
 
     fn set_dst(&mut self, dst: Dst) {
         let reg = match dst {
-            Dst::None => RegRef::zero(RegFile::GPR, 1),
+            Dst::None => zero_reg(),
             Dst::Reg(reg) => reg,
             _ => panic!("invalid dst {dst}"),
         };
@@ -317,43 +428,6 @@ impl SM50Encoder<'_> {
 // Legalization helpers
 //
 
-pub trait SM50LegalizeBuildHelpers: LegalizeBuildHelpers {
-    fn copy_alu_src_if_fabs(
-        &mut self,
-        src: &mut Src,
-        reg_file: RegFile,
-        src_type: SrcType,
-    ) {
-        if src.src_mod.has_fabs() {
-            self.copy_alu_src_and_lower_fmod(src, reg_file, src_type);
-        }
-    }
-
-    fn copy_alu_src_if_i20_overflow(
-        &mut self,
-        src: &mut Src,
-        reg_file: RegFile,
-        src_type: SrcType,
-    ) {
-        if src.as_imm_not_i20().is_some() {
-            self.copy_alu_src(src, reg_file, src_type);
-        }
-    }
-
-    fn copy_alu_src_if_f20_overflow(
-        &mut self,
-        src: &mut Src,
-        reg_file: RegFile,
-        src_type: SrcType,
-    ) {
-        if src.as_imm_not_f20().is_some() {
-            self.copy_alu_src(src, reg_file, src_type);
-        }
-    }
-}
-
-impl SM50LegalizeBuildHelpers for LegalizeBuilder<'_> {}
-
 /// Helper to legalize extended or external instructions
 ///
 /// These are instructions which reach out external units such as load/store
@@ -415,6 +489,13 @@ impl SM50Op for OpFAdd {
         let [src0, src1] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+
+        if src1.as_imm_not_f20().is_some()
+            && self.rnd_mode != FRndMode::NearestEven
+        {
+            // Hardware cannot encode long-immediate + rounding mode
+            b.copy_alu_src(src1, GPR, SrcType::F32);
+        }
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
@@ -423,6 +504,7 @@ impl SM50Op for OpFAdd {
             e.set_dst(self.dst);
             e.set_reg_fmod_src(8..16, 54, 56, self.srcs[0]);
             e.set_src_imm32(20..52, imm32);
+            assert!(self.rnd_mode == FRndMode::NearestEven);
             e.set_bit(55, self.ftz);
         } else {
             match &self.srcs[1].src_ref {
@@ -433,7 +515,7 @@ impl SM50Op for OpFAdd {
                 SrcRef::Imm32(imm32) => {
                     e.set_opcode(0x3858);
                     e.set_src_imm_f20(20..39, 56, *imm32);
-                    assert!(self.srcs[1].src_mod.is_none());
+                    assert!(self.srcs[1].is_unmodified());
                 }
                 SrcRef::CBuf(_) => {
                     e.set_opcode(0x4c58);
@@ -543,7 +625,7 @@ impl SM50Op for OpFMnMx {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3860);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4c60);
@@ -567,6 +649,13 @@ impl SM50Op for OpFMul {
         b.copy_alu_src_if_fabs(src1, GPR, SrcType::F32);
         swap_srcs_if_not_reg(src0, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::F32);
+
+        if src1.as_imm_not_f20().is_some()
+            && self.rnd_mode != FRndMode::NearestEven
+        {
+            // Hardware cannot encode long-immediate + rounding mode
+            b.copy_alu_src(src1, GPR, SrcType::F32);
+        }
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
@@ -584,6 +673,7 @@ impl SM50Op for OpFMul {
             e.set_bit(53, self.ftz);
             e.set_bit(54, self.dnz);
             e.set_bit(55, self.saturate);
+            assert!(self.rnd_mode == FRndMode::NearestEven);
 
             if fneg {
                 // Flip the immediate sign bit
@@ -635,7 +725,7 @@ impl SM50Op for OpRro {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3890);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.src.src_mod.is_none());
+                assert!(self.src.is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4c90);
@@ -727,6 +817,8 @@ impl SM50Encoder<'_> {
         self.set_field(
             range,
             match op {
+                IntCmpOp::False => 0_u8,
+                IntCmpOp::True => 7_u8,
                 IntCmpOp::Eq => 2_u8,
                 IntCmpOp::Ne => 5_u8,
                 IntCmpOp::Lt => 1_u8,
@@ -758,7 +850,7 @@ impl SM50Op for OpFSet {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3000);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4800);
@@ -796,7 +888,7 @@ impl SM50Op for OpFSetP {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x36b0);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4bb0);
@@ -875,7 +967,7 @@ impl SM50Op for OpDAdd {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3870);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4c70);
@@ -974,7 +1066,7 @@ impl SM50Op for OpDMnMx {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3850);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4c50);
@@ -1052,7 +1144,7 @@ impl SM50Op for OpDSetP {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3680);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4b80);
@@ -1122,7 +1214,7 @@ impl SM50Op for OpFlo {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3830);
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.src.src_mod.is_none());
+                assert!(self.src.is_unmodified());
             }
             SrcRef::CBuf(cb) => {
                 e.set_opcode(0x4c30);
@@ -1146,13 +1238,7 @@ impl SM50Op for OpIAdd2 {
         swap_srcs_if_not_reg(src0, src1, GPR);
         if src0.src_mod.is_ineg() && src1.src_mod.is_ineg() {
             assert!(self.carry_out.is_none());
-            let val = b.alloc_ssa(GPR, 1);
-            b.push_op(OpIAdd2 {
-                dst: val.into(),
-                carry_out: Dst::None,
-                srcs: [Src::new_zero(), *src0],
-            });
-            *src0 = val.into();
+            b.copy_alu_src_and_lower_ineg(src0, GPR, SrcType::I32);
         }
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
         if !self.carry_out.is_none() {
@@ -1163,9 +1249,7 @@ impl SM50Op for OpIAdd2 {
     fn encode(&self, e: &mut SM50Encoder<'_>) {
         // Hardware requires at least one of these be unmodified.  Otherwise, it
         // encodes as iadd.po which isn't what we want.
-        assert!(
-            self.srcs[0].src_mod.is_none() || self.srcs[1].src_mod.is_none()
-        );
+        assert!(self.srcs[0].is_unmodified() || self.srcs[1].is_unmodified());
 
         let carry_out = match self.carry_out {
             Dst::Reg(reg) if reg.file() == RegFile::Carry => true,
@@ -1191,7 +1275,7 @@ impl SM50Op for OpIAdd2 {
                 SrcRef::Imm32(imm32) => {
                     e.set_opcode(0x3810);
                     e.set_src_imm_i20(20..39, 56, *imm32);
-                    assert!(self.srcs[1].src_mod.is_none());
+                    assert!(self.srcs[1].is_unmodified());
                 }
                 SrcRef::CBuf(_) => {
                     e.set_opcode(0x4c10);
@@ -1247,7 +1331,7 @@ impl SM50Op for OpIAdd2X {
                 SrcRef::Imm32(imm32) => {
                     e.set_opcode(0x3810);
                     e.set_src_imm_i20(20..39, 56, *imm32);
-                    assert!(self.srcs[1].src_mod.is_none());
+                    assert!(self.srcs[1].is_unmodified());
                 }
                 SrcRef::CBuf(_) => {
                     e.set_opcode(0x4c10);
@@ -1334,8 +1418,8 @@ impl SM50Op for OpIMul {
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        assert!(self.srcs[0].src_mod.is_none());
-        assert!(self.srcs[1].src_mod.is_none());
+        assert!(self.srcs[0].is_unmodified());
+        assert!(self.srcs[1].is_unmodified());
 
         if let Some(i) = self.srcs[1].as_imm_not_i20() {
             e.set_opcode(0x1fc0);
@@ -1389,7 +1473,7 @@ impl SM50Op for OpIMnMx {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3820);
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(cb) => {
                 e.set_opcode(0x4c20);
@@ -1432,7 +1516,7 @@ impl SM50Op for OpISetP {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x3660);
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.srcs[1].src_mod.is_none());
+                assert!(self.srcs[1].is_unmodified());
             }
             SrcRef::CBuf(cb) => {
                 e.set_opcode(0x4b60);
@@ -1507,7 +1591,7 @@ impl SM50Op for OpLop2 {
                 SrcRef::Imm32(imm32) => {
                     e.set_opcode(0x3840);
                     e.set_src_imm_i20(20..39, 56, *imm32);
-                    assert!(self.srcs[1].src_mod.is_none());
+                    assert!(self.srcs[1].is_unmodified());
                 }
                 SrcRef::CBuf(_) => {
                     e.set_opcode(0x4c40);
@@ -1580,7 +1664,7 @@ impl SM50Op for OpShf {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(if self.right { 0x38f8 } else { 0x36f8 });
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.shift.src_mod.is_none());
+                assert!(self.shift.is_unmodified());
             }
             src => panic!("Invalid shf shift: {src}"),
         }
@@ -1689,7 +1773,7 @@ impl SM50Op for OpF2F {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x38a8);
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.src.src_mod.is_none());
+                assert!(self.src.is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4ca8);
@@ -1731,7 +1815,7 @@ impl SM50Op for OpF2I {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x38b0);
                 e.set_src_imm_f20(20..39, 56, *imm32);
-                assert!(self.src.src_mod.is_none());
+                assert!(self.src.is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4cb0);
@@ -1772,7 +1856,7 @@ impl SM50Op for OpI2F {
             SrcRef::Imm32(imm32) => {
                 e.set_opcode(0x38b8);
                 e.set_src_imm_i20(20..39, 56, *imm32);
-                assert!(self.src.src_mod.is_none());
+                assert!(self.src.is_unmodified());
             }
             SrcRef::CBuf(_) => {
                 e.set_opcode(0x4cb8);
@@ -2047,15 +2131,49 @@ impl SM50Encoder<'_> {
             },
         );
     }
+
+    fn set_tex_channel_mask(
+        &mut self,
+        range: Range<usize>,
+        channel_mask: ChannelMask,
+    ) {
+        self.set_field(range, channel_mask.to_bits());
+    }
+}
+
+fn legalize_tex_instr(op: &mut impl SrcsAsSlice, _b: &mut LegalizeBuilder) {
+    // Texture instructions have one or two sources.  When they have two, the
+    // second one is optional and we can set rZ instead.
+    let srcs = op.srcs_as_mut_slice();
+    assert!(matches!(&srcs[0].src_ref, SrcRef::SSA(_)));
+    if srcs.len() > 1 {
+        debug_assert!(srcs.len() == 2);
+        assert!(matches!(&srcs[1].src_ref, SrcRef::SSA(_) | SrcRef::Zero));
+    }
 }
 
 impl SM50Op for OpTex {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xdeb8);
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0x0380);
+                e.set_field(36..49, idx);
+                e.set_bit(54, self.offset);
+                e.set_tex_lod_mode(55..57, self.lod_mode);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xdeb8);
+                e.set_bit(36, self.offset);
+                e.set_tex_lod_mode(37..39, self.lod_mode);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2064,22 +2182,31 @@ impl SM50Op for OpTex {
         e.set_reg_src(20..28, self.srcs[1]);
 
         e.set_tex_dim(28..31, self.dim);
-        e.set_field(31..35, self.mask);
+        e.set_tex_channel_mask(31..35, self.channel_mask);
         e.set_bit(35, false); // ToDo: NDV
-        e.set_bit(36, self.offset);
-        e.set_tex_lod_mode(37..39, self.lod_mode);
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_bit(49, self.nodep);
         e.set_bit(50, self.z_cmpr);
     }
 }
 
 impl SM50Op for OpTld {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xdd38);
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0xdc38);
+                e.set_field(36..49, idx);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xdd38);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2088,9 +2215,9 @@ impl SM50Op for OpTld {
         e.set_reg_src(20..28, self.srcs[1]);
 
         e.set_tex_dim(28..31, self.dim);
-        e.set_field(31..35, self.mask);
+        e.set_tex_channel_mask(31..35, self.channel_mask);
         e.set_bit(35, self.offset);
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_bit(49, self.nodep);
         e.set_bit(50, self.is_ms);
 
         assert!(
@@ -2103,11 +2230,31 @@ impl SM50Op for OpTld {
 
 impl SM50Op for OpTld4 {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xdef8);
+        let offset_mode = match self.offset_mode {
+            Tld4OffsetMode::None => 0_u8,
+            Tld4OffsetMode::AddOffI => 1_u8,
+            Tld4OffsetMode::PerPx => 2_u8,
+        };
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0xc838);
+                e.set_field(36..49, idx);
+                e.set_field(54..56, offset_mode);
+                e.set_field(56..58, self.comp);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xdef8);
+                e.set_field(36..38, offset_mode);
+                e.set_field(38..40, self.comp);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2116,29 +2263,31 @@ impl SM50Op for OpTld4 {
         e.set_reg_src(20..28, self.srcs[1]);
 
         e.set_tex_dim(28..31, self.dim);
-        e.set_field(31..35, self.mask);
+        e.set_tex_channel_mask(31..35, self.channel_mask);
         e.set_bit(35, false); // ToDo: NDV
-        e.set_field(
-            36..38,
-            match self.offset_mode {
-                Tld4OffsetMode::None => 0_u8,
-                Tld4OffsetMode::AddOffI => 1_u8,
-                Tld4OffsetMode::PerPx => 2_u8,
-            },
-        );
-        e.set_field(38..40, self.comp);
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_bit(49, self.nodep);
         e.set_bit(50, self.z_cmpr);
     }
 }
 
 impl SM50Op for OpTmml {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xdf60);
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0xdf58);
+                e.set_field(36..49, idx);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xdf60);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2146,19 +2295,30 @@ impl SM50Op for OpTmml {
         e.set_reg_src(20..28, self.srcs[1]);
 
         e.set_tex_dim(28..31, self.dim);
-        e.set_field(31..35, self.mask);
+        e.set_tex_channel_mask(31..35, self.channel_mask);
         e.set_bit(35, false); // ToDo: NDV
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_bit(49, self.nodep);
     }
 }
 
 impl SM50Op for OpTxd {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xde78);
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0xde38);
+                e.set_field(36..49, idx);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xde78);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2167,19 +2327,30 @@ impl SM50Op for OpTxd {
         e.set_reg_src(20..28, self.srcs[1]);
 
         e.set_tex_dim(28..31, self.dim);
-        e.set_field(31..35, self.mask);
+        e.set_tex_channel_mask(31..35, self.channel_mask);
         e.set_bit(35, self.offset);
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_bit(49, self.nodep);
     }
 }
 
 impl SM50Op for OpTxq {
     fn legalize(&mut self, b: &mut LegalizeBuilder) {
-        legalize_ext_instr(self, b);
+        legalize_tex_instr(self, b);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        e.set_opcode(0xdf50);
+        match self.tex {
+            TexRef::Bound(idx) => {
+                e.set_opcode(0xdf48);
+                e.set_field(36..49, idx);
+            }
+            TexRef::CBuf { .. } => {
+                panic!("SM50 doesn't have CBuf textures");
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0xdf50);
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         assert!(self.dsts[1].is_none());
@@ -2197,8 +2368,8 @@ impl SM50Op for OpTxq {
                 // TexQuery::BorderColour => 0x16,
             },
         );
-        e.set_field(31..35, self.mask);
-        e.set_bit(49, false); // TODO: .NODEP
+        e.set_tex_channel_mask(31..35, self.channel_mask);
+        e.set_bit(49, self.nodep);
     }
 }
 
@@ -2249,6 +2420,19 @@ impl SM50Encoder<'_> {
             },
         );
     }
+
+    fn set_image_channel_mask(
+        &mut self,
+        range: Range<usize>,
+        channel_mask: ChannelMask,
+    ) {
+        assert!(
+            channel_mask.to_bits() == 0x1
+                || channel_mask.to_bits() == 0x3
+                || channel_mask.to_bits() == 0xf
+        );
+        self.set_field(range, channel_mask.to_bits());
+    }
 }
 
 impl SM50Op for OpSuLd {
@@ -2259,8 +2443,16 @@ impl SM50Op for OpSuLd {
     fn encode(&self, e: &mut SM50Encoder<'_>) {
         e.set_opcode(0xeb00);
 
-        assert!(self.mask == 0x1 || self.mask == 0x3 || self.mask == 0xf);
-        e.set_field(20..24, self.mask);
+        match self.image_access {
+            ImageAccess::Binary(mem_type) => {
+                e.set_bit(52, true); // .B
+                e.set_mem_type(20..23, mem_type);
+            }
+            ImageAccess::Formatted(channel_mask) => {
+                e.set_bit(52, false); // .P
+                e.set_image_channel_mask(20..24, channel_mask);
+            }
+        }
         e.set_image_dim(33..36, self.image_dim);
 
         // mem_eviction_policy not a thing for sm < 70
@@ -2296,15 +2488,23 @@ impl SM50Op for OpSuSt {
     fn encode(&self, e: &mut SM50Encoder<'_>) {
         e.set_opcode(0xeb20);
 
+        match self.image_access {
+            ImageAccess::Binary(mem_type) => {
+                e.set_bit(52, true); // .B
+                e.set_mem_type(20..23, mem_type);
+            }
+            ImageAccess::Formatted(channel_mask) => {
+                e.set_bit(52, false); // .P
+                e.set_image_channel_mask(20..24, channel_mask);
+            }
+        }
+
         e.set_reg_src(8..16, self.coord);
         e.set_reg_src(0..8, self.data);
         e.set_reg_src(39..47, self.handle);
 
         e.set_image_dim(33..36, self.image_dim);
         e.set_mem_order(&self.mem_order);
-
-        assert!(self.mask == 0x1 || self.mask == 0x3 || self.mask == 0xf);
-        e.set_field(20..24, self.mask);
     }
 }
 
@@ -2397,7 +2597,7 @@ impl SM50Op for OpLdc {
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
-        assert!(self.cb.src_mod.is_none());
+        assert!(self.cb.is_unmodified());
         let SrcRef::CBuf(cb) = &self.cb.src_ref else {
             panic!("Not a CBuf source");
         };
@@ -2590,6 +2790,11 @@ impl SM50Op for OpAtom {
                         _ => panic!("Unsupported data type"),
                     };
                     e.set_field(28..30, data_type);
+                    assert!(
+                        self.atom_type != AtomType::U64
+                            || self.atom_op == AtomOp::Exch,
+                        "64-bit Shared atomics only support CmpExch or Exch"
+                    );
                     e.set_atom_op(52..56, self.atom_op);
                 }
 
@@ -2613,9 +2818,8 @@ impl SM50Op for OpAL2P {
         e.set_dst(self.dst);
         e.set_reg_src(8..16, self.offset);
 
-        e.set_field(20..31, self.access.addr);
-        assert!(!self.access.patch);
-        e.set_bit(32, self.access.output);
+        e.set_field(20..31, self.addr);
+        e.set_bit(32, self.output);
 
         e.set_field(47..49, 0_u8); // comps
         e.set_pred_dst(44..47, Dst::None);
@@ -2631,19 +2835,19 @@ impl SM50Op for OpALd {
         e.set_opcode(0xefd8);
 
         e.set_dst(self.dst);
-        if self.access.phys {
-            assert!(!self.access.patch);
+        if self.phys {
+            assert!(!self.patch);
             assert!(self.offset.src_ref.as_reg().is_some());
-        } else if !self.access.patch {
+        } else if !self.patch {
             assert!(self.offset.is_zero());
         }
         e.set_reg_src(8..16, self.offset);
         e.set_reg_src(39..47, self.vtx);
 
-        e.set_field(20..30, self.access.addr);
-        e.set_bit(31, self.access.patch);
-        e.set_bit(32, self.access.output);
-        e.set_field(47..49, self.access.comps - 1);
+        e.set_field(20..30, self.addr);
+        e.set_bit(31, self.patch);
+        e.set_bit(32, self.output);
+        e.set_field(47..49, self.comps - 1);
     }
 }
 
@@ -2659,12 +2863,11 @@ impl SM50Op for OpASt {
         e.set_reg_src(8..16, self.offset);
         e.set_reg_src(39..47, self.vtx);
 
-        assert!(!self.access.phys);
-        assert!(self.access.output);
-        e.set_field(20..30, self.access.addr);
-        e.set_bit(31, self.access.patch);
-        e.set_bit(32, self.access.output);
-        e.set_field(47..49, self.access.comps - 1);
+        assert!(!self.phys);
+        e.set_field(20..30, self.addr);
+        e.set_bit(31, self.patch);
+        e.set_bit(32, true); // output
+        e.set_field(47..49, self.comps - 1);
     }
 }
 

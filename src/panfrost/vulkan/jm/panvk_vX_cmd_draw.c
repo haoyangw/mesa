@@ -185,6 +185,9 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_BIAS_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_BIAS_FACTORS) ||
+                dyn_gfx_state_dirty(cmdbuf, RS_LINE_MODE) ||
+                /* line mode needs primitive topology */
+                dyn_gfx_state_dirty(cmdbuf, IA_PRIMITIVE_TOPOLOGY) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_LOGIC_OP_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_LOGIC_OP) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_ATTACHMENT_COUNT) ||
@@ -193,6 +196,7 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
                 dyn_gfx_state_dirty(cmdbuf, CB_BLEND_EQUATIONS) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_WRITE_MASKS) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_BLEND_CONSTANTS) ||
+                dyn_gfx_state_dirty(cmdbuf, COLOR_ATTACHMENT_MAP) ||
                 dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_TEST_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_WRITE_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_COMPARE_OP) ||
@@ -217,15 +221,29 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
    const struct vk_dynamic_graphics_state *dyns =
       &cmdbuf->vk.dynamic_graphics_state;
    const struct vk_rasterization_state *rs = &dyns->rs;
-   const struct vk_color_blend_state *cb = &dyns->cb;
    const struct vk_depth_stencil_state *ds = &dyns->ds;
+   const struct vk_input_assembly_state *ia = &dyns->ia;
    const struct panvk_shader *fs = get_fs(cmdbuf);
    const struct pan_shader_info *fs_info = fs ? &fs->info : NULL;
-   unsigned bd_count = MAX2(cb->attachment_count, 1);
+   uint32_t bd_count = MAX2(cmdbuf->state.gfx.render.fb.info.rt_count, 1);
    bool test_s = has_stencil_att(cmdbuf) && ds->stencil.test_enable;
    bool test_z = has_depth_att(cmdbuf) && ds->depth.test_enable;
    bool writes_z = writes_depth(cmdbuf);
    bool writes_s = writes_stencil(cmdbuf);
+
+   bool msaa = dyns->ms.rasterization_samples > 1;
+   if ((ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+        ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) &&
+       rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM) {
+      /* we need to disable MSAA when rendering bresenham lines.
+       *
+       * From the Vulkan spec:
+       *   "When Bresenham lines are being rasterized, sample locations may
+       *    all be treated as being at the pixel center (this may affect
+       *    attribute and depth interpolation).""
+       */
+      msaa = false;
+   }
 
    struct panfrost_ptr ptr = panvk_cmd_alloc_desc_aggregate(
       cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(bd_count, BLEND));
@@ -251,7 +269,6 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
 
    pan_pack(rsd, RENDERER_STATE, cfg) {
       bool alpha_to_coverage = dyns->ms.alpha_to_coverage_enable;
-      bool msaa = dyns->ms.rasterization_samples > 1;
 
       if (fs) {
          pan_shader_prepare_rsd(fs_info, fs_code, &cfg);
@@ -265,12 +282,21 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
                                  8));
          }
 
-         uint8_t rt_written = fs_info->outputs_written >> FRAG_RESULT_DATA0;
          uint8_t rt_mask = cmdbuf->state.gfx.render.bound_attachments &
                            MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+         uint8_t rt_written = color_attachment_written_mask(
+            fs, &cmdbuf->vk.dynamic_graphics_state.cal);
+         uint8_t rt_read = color_attachment_read_mask(fs, &dyns->ial, rt_mask);
+         enum pan_earlyzs_zs_tilebuf_read zs_read =
+            (z_attachment_read(fs, &dyns->ial) ||
+             s_attachment_read(fs, &dyns->ial))
+               ? PAN_EARLYZS_ZS_TILEBUF_READ_NO_OPT
+               : PAN_EARLYZS_ZS_TILEBUF_NOT_READ;
+
          cfg.properties.allow_forward_pixel_to_kill =
             fs_info->fs.can_fpk && !(rt_mask & ~rt_written) &&
-            !alpha_to_coverage && !binfo->any_dest_read;
+            !(rt_read & rt_written) && !alpha_to_coverage &&
+            !binfo->any_dest_read;
 
          bool writes_zs = writes_z || writes_s;
          bool zs_always_passes = ds_test_always_passes(cmdbuf);
@@ -278,13 +304,13 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
                    MALI_OCCLUSION_MODE_DISABLED;
 
          struct pan_earlyzs_state earlyzs =
-            pan_earlyzs_get(pan_earlyzs_analyze(fs_info), writes_zs || oq,
-                            alpha_to_coverage, zs_always_passes);
+            pan_earlyzs_get(fs->fs.earlyzs_lut, writes_zs || oq,
+                            alpha_to_coverage, zs_always_passes, zs_read);
 
          cfg.properties.pixel_kill_operation = earlyzs.kill;
          cfg.properties.zs_update_operation = earlyzs.update;
          cfg.multisample_misc.evaluate_per_sample =
-            (fs->info.fs.sample_shading && msaa);
+            (fs->info.fs.sample_shading && dyns->ms.rasterization_samples > 1);
       } else {
          cfg.properties.depth_source = MALI_DEPTH_SOURCE_FIXED_FUNCTION;
          cfg.properties.allow_forward_pixel_to_kill = true;
@@ -313,6 +339,9 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
       cfg.stencil_mask_misc.alpha_test_compare_function = MALI_FUNC_ALWAYS;
       cfg.stencil_mask_misc.front_facing_depth_bias = rs->depth_bias.enable;
       cfg.stencil_mask_misc.back_facing_depth_bias = rs->depth_bias.enable;
+
+      if (rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM)
+         cfg.stencil_mask_misc.aligned_line_ends = true;
 
       cfg.depth_units = rs->depth_bias.constant_factor;
       cfg.depth_factor = rs->depth_bias.slope_factor;
@@ -809,8 +838,7 @@ panvk_emit_tiler_primitive(struct panvk_cmd_buffer *cmdbuf,
          cfg.point_size_array_format = MALI_POINT_SIZE_ARRAY_FORMAT_FP16;
 
       cfg.first_provoking_vertex =
-         cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
-            VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+         cmdbuf->state.gfx.render.first_provoking_vertex != U_TRISTATE_NO;
 
       if (ia->primitive_restart_enable)
          cfg.primitive_restart = MALI_PRIMITIVE_RESTART_IMPLICIT;
@@ -863,7 +891,7 @@ panvk_emit_tiler_primitive_size(struct panvk_cmd_buffer *cmdbuf,
       if (writes_point_size) {
          cfg.size_array = draw->psiz;
       } else {
-         cfg.constant = draw->line_width;
+         cfg.fixed_sized = draw->line_width;
       }
    }
 }
@@ -915,21 +943,30 @@ panvk_emit_tiler_dcd(struct panvk_cmd_buffer *cmdbuf,
 }
 
 static void
-set_provoking_vertex_mode(struct panvk_cmd_buffer *cmdbuf)
+set_provoking_vertex_mode(struct panvk_cmd_buffer *cmdbuf,
+                          enum u_tristate first_provoking_vertex)
 {
-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
-   bool first_provoking_vertex =
-      cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
-         VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+   struct panvk_cmd_graphics_state *state = &cmdbuf->state.gfx;
 
-   /* If this is not the first draw, first_provoking_vertex should match
-    * the one from the previous draws. Unfortunately, we can't check it
-    * when the render pass is inherited. */
-   assert(!cmdbuf->cur_batch->fb.desc.gpu ||
-          fbinfo->first_provoking_vertex == first_provoking_vertex);
+   if (first_provoking_vertex != U_TRISTATE_UNSET) {
+      /* If this is not the first draw, first_provoking_vertex should match
+       * the one from the previous draws. Unfortunately, we can't check it
+       * when the render pass is inherited. */
+      assert(state->render.first_provoking_vertex == U_TRISTATE_UNSET ||
+             state->render.first_provoking_vertex == first_provoking_vertex);
+      state->render.first_provoking_vertex = first_provoking_vertex;
+   }
 
-   fbinfo->first_provoking_vertex = first_provoking_vertex;
+   /* Once we emit the first FBDs/TDs, we need to commit to a state. If we
+    * choose the wrong one, we will fail the assert when the next application
+    * draw happens (with a different state). Use PROVOKING_VERTEX_MODE_FIRST
+    * because it's the vulkan default, and so likely to be right more often.
+    *
+    * TODO: handle this case better */
+   if (state->render.first_provoking_vertex == U_TRISTATE_UNSET)
+      state->render.first_provoking_vertex = U_TRISTATE_YES;
 }
+
 
 static VkResult
 panvk_draw_prepare_tiler_job(struct panvk_cmd_buffer *cmdbuf,
@@ -1149,7 +1186,16 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_data *draw)
       cmdbuf->state.gfx.occlusion_query.mode != MALI_OCCLUSION_MODE_DISABLED;
    bool needs_tiling = !rs->rasterizer_discard_enable || active_occlusion;
 
-   set_provoking_vertex_mode(cmdbuf);
+   if (cmdbuf->state.gfx.vk_meta) {
+      /* vk_meta doesn't care about the provoking vertex mode, we should use
+       * the same mode that the application uses. */
+      set_provoking_vertex_mode(cmdbuf, U_TRISTATE_UNSET);
+   } else {
+      enum u_tristate first_provoking_vertex = u_tristate_make(
+         cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
+         VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
+      set_provoking_vertex_mode(cmdbuf, first_provoking_vertex);
+   }
 
    if (!rs->rasterizer_discard_enable) {
       struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
@@ -1254,22 +1300,25 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_data *draw)
          return;
    }
 
+   panvk_per_arch(cmd_prepare_draw_sysvals)(cmdbuf, &draw->info);
+
+   /* Viewport emission requires up-to-date {scale,offset}.z for min/max Z,
+    * so we need to call it after calling cmd_prepare_draw_sysvals(), but
+    * viewports are the same for all layers, so we only emit when layer_id=0.
+    */
+   result = panvk_draw_prepare_viewport(cmdbuf, draw);
+   if (result != VK_SUCCESS)
+      return;
+
    for (uint32_t i = 0; i < layer_count; i++) {
       draw->info.layer_id = i;
       result = panvk_draw_prepare_varyings(cmdbuf, draw);
       if (result != VK_SUCCESS)
          return;
 
-      panvk_per_arch(cmd_prepare_draw_sysvals)(cmdbuf, &draw->info);
-
-      /* Viewport emission requires up-to-date {scale,offset}.z for min/max Z,
-       * so we need to call it after calling cmd_prepare_draw_sysvals(), but
-       * viewports are the same for all layers, so we only emit when layer_id=0.
-       */
-      if (i == 0) {
-         result = panvk_draw_prepare_viewport(cmdbuf, draw);
-         if (result != VK_SUCCESS)
-            return;
+      if (i > 0) {
+         cmdbuf->state.gfx.sysvals.layer_id = i;
+         gfx_state_set_dirty(cmdbuf, FS_PUSH_UNIFORMS);
       }
 
       result = panvk_per_arch(cmd_prepare_push_uniforms)(

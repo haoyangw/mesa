@@ -33,7 +33,10 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_QUERY_COPY_WITH_SHADER_THRESHOLD(6)
       DRI_CONF_ANV_FORCE_INDIRECT_DESCRIPTORS(false)
       DRI_CONF_SHADER_SPILLING_RATE(11)
-      DRI_CONF_OPT_B(intel_tbimr, true, "Enable TBIMR tiled rendering")
+      DRI_CONFIG_INTEL_TBIMR(true)
+      DRI_CONFIG_INTEL_VF_DISTRIBUTION(true)
+      DRI_CONFIG_INTEL_TE_DISTRIBUTION(true)
+      DRI_CONFIG_INTEL_STORAGE_CACHE_POLICY_WT(false)
       DRI_CONF_ANV_COMPRESSION_CONTROL_ENABLED(false)
       DRI_CONF_ANV_FAKE_NONLOCAL_MEMORY(false)
       DRI_CONF_OPT_E(intel_stack_id, 512, 256, 2048,
@@ -60,11 +63,23 @@ static const driOptionDescription anv_dri_options[] = {
 #else
       DRI_CONF_VK_REQUIRE_ASTC(false)
 #endif
+      DRI_CONF_ANV_VF_COMPONENT_PACKING(true)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_QUALITY
       DRI_CONF_PP_LOWER_DEPTH_RANGE_RATE()
    DRI_CONF_SECTION_END
+};
+
+static const struct debug_control debug_control[] = {
+   { "bindless",     ANV_DEBUG_BINDLESS},
+   { "no-gpl",       ANV_DEBUG_NO_GPL},
+   { "no-sparse",    ANV_DEBUG_NO_SPARSE},
+   { "sparse-trtt",  ANV_DEBUG_SPARSE_TRTT},
+   { "video-decode", ANV_DEBUG_VIDEO_DECODE},
+   { "video-encode", ANV_DEBUG_VIDEO_ENCODE},
+   { "shader-hash",  ANV_DEBUG_SHADER_HASH},
+   { NULL,    0 }
 };
 
 VkResult anv_EnumerateInstanceVersion(
@@ -173,6 +188,10 @@ anv_init_dri_options(struct anv_instance *instance)
     instance->has_fake_sparse =
        driQueryOptionb(&instance->dri_options, "fake_sparse");
     instance->enable_tbimr = driQueryOptionb(&instance->dri_options, "intel_tbimr");
+    instance->enable_vf_distribution =
+       driQueryOptionb(&instance->dri_options, "intel_vf_distribution");
+    instance->enable_te_distribution =
+       driQueryOptionb(&instance->dri_options, "intel_te_distribution");
     instance->disable_fcv =
        driQueryOptionb(&instance->dri_options, "anv_disable_fcv");
     instance->enable_buffer_comp =
@@ -189,6 +208,8 @@ anv_init_dri_options(struct anv_instance *instance)
     instance->custom_border_colors_without_format =
        driQueryOptionb(&instance->dri_options,
                        "custom_border_colors_without_format");
+    instance->vf_component_packing =
+       driQueryOptionb(&instance->dri_options, "anv_vf_component_packing");
 
     instance->stack_ids = driQueryOptioni(&instance->dri_options, "intel_stack_id");
     switch (instance->stack_ids) {
@@ -244,6 +265,9 @@ VkResult anv_CreateInstance(
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
    anv_init_dri_options(instance);
+
+   instance->debug = parse_debug_string(os_get_option("ANV_DEBUG"),
+                                        debug_control);
 
    intel_driver_ds_init();
 

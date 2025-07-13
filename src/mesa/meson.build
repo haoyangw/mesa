@@ -2,7 +2,16 @@
 # SPDX-License-Identifier: MIT
 
 subdir('program')
-subdir('main')
+
+if _shader_replacement != ''
+  shader_replacement_h = custom_target(
+    'shader_replacement.h',
+    input: [files(_shader_replacement + '/process_shaders.py')],
+    output: 'shader_replacement.h',
+    command: [prog_python, '@INPUT0@', _shader_replacement, '@OUTPUT@'],
+    build_always: true,
+  )
+endif
 
 # files shared between classic mesa and gallium mesa
 files_libmesa = files(
@@ -391,10 +400,10 @@ format_fallback_c = custom_target(
 
 get_hash_h = custom_target(
   'get_hash.h',
-  input : ['main/get_hash_generator.py', gl_and_es_api_files],
+  input : ['main/get_hash_generator.py', '../mapi/glapi/gen/gl_and_es_API.xml'],
   output : 'get_hash.h',
   command : [prog_python, '@INPUT0@', '-f', '@INPUT1@'],
-  depend_files : files('main/get_hash_params.py'),
+  depend_files : files('main/get_hash_params.py') + glapi_xml_py_deps,
   capture : true,
 )
 
@@ -443,7 +452,6 @@ endif
 _mesa_windows_args = []
 if with_platform_windows
   _mesa_windows_args += [
-    '-D_GLAPI_NO_EXPORTS',
     '-D_GDI32_',    # prevent gl* being declared __declspec(dllimport) in MS headers
   ]
 endif

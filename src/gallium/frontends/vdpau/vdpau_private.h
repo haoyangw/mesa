@@ -172,6 +172,8 @@ ChromaToPipeFormat(VdpChromaType vdpau_type)
       case VDP_CHROMA_TYPE_420_16:
          return PIPE_FORMAT_P016;
 #endif
+      case VDP_CHROMA_TYPE_422:
+         return PIPE_FORMAT_UYVY;
       default:
          assert(0);
    }
@@ -449,7 +451,7 @@ typedef struct
 typedef struct
 {
    vlVdpDevice *device;
-   struct pipe_video_buffer templat, *video_buffer;
+   struct pipe_video_buffer templat, *video_buffer, *ref_buffer;
 } vlVdpSurface;
 
 typedef struct

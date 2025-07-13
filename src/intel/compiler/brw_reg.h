@@ -227,6 +227,7 @@ typedef struct brw_reg {
    bool is_negative_one() const;
    bool is_null() const;
    bool is_accumulator() const;
+   bool is_ip() const;
    bool is_address() const;
 
    unsigned address_slot(unsigned byte_offset) const;
@@ -362,6 +363,7 @@ get_exec_type(const enum brw_reg_type type)
    case BRW_TYPE_UV:
       return BRW_TYPE_UW;
    case BRW_TYPE_VF:
+   case BRW_TYPE_BF:
       return BRW_TYPE_F;
    default:
       return type;

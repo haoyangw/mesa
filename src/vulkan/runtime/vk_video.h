@@ -183,6 +183,10 @@ void vk_video_derive_h264_scaling_list(const StdVideoH264SequenceParameterSet *s
                                        const StdVideoH264PictureParameterSet *pps,
                                        StdVideoH264ScalingLists *list);
 
+void vk_video_derive_h265_scaling_list(const StdVideoH265SequenceParameterSet *sps,
+                                       const StdVideoH265PictureParameterSet *pps,
+                                       const StdVideoH265ScalingLists **list);
+
 const StdVideoH264SequenceParameterSet *
 vk_video_find_h264_dec_std_sps(const struct vk_video_session_parameters *params,
                                uint32_t id);
@@ -363,4 +367,26 @@ vk_video_encode_h265_slice_header(const StdVideoEncodeH265PictureInfo *pic_info,
                                   const int8_t slice_qp_delta,
                                   size_t *data_size_ptr,
                                   void *data_ptr);
+
+void
+vk_video_get_h264_parameters(const struct vk_video_session *session,
+                             const struct vk_video_session_parameters *params,
+                             const VkVideoDecodeInfoKHR *decode_info,
+                             const VkVideoDecodeH264PictureInfoKHR *h264_pic_info,
+                             const StdVideoH264SequenceParameterSet **sps_p,
+                             const StdVideoH264PictureParameterSet **pps_p);
+
+void
+vk_video_get_h265_parameters(const struct vk_video_session *session,
+                             const struct vk_video_session_parameters *params,
+                             const VkVideoDecodeInfoKHR *decode_info,
+                             const VkVideoDecodeH265PictureInfoKHR *h265_pic_info,
+                             const StdVideoH265SequenceParameterSet **sps_p,
+                             const StdVideoH265PictureParameterSet **pps_p);
+
+void
+vk_video_get_av1_parameters(const struct vk_video_session *session,
+                            const struct vk_video_session_parameters *params,
+                            const VkVideoDecodeInfoKHR *decode_info,
+                            const StdVideoAV1SequenceHeader **seq_hdr_p);
 #endif

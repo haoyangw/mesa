@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include "genxml/gen_macros.h"
 
+#include "drm-uapi/panthor_drm.h"
+
 #include "panvk_buffer.h"
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
@@ -43,18 +45,176 @@
 #include "vk_pipeline_layout.h"
 #include "vk_render_pass.h"
 
+static enum cs_reg_perm
+provoking_vertex_fn_reg_perm_cb(struct cs_builder *b, unsigned reg)
+{
+   return CS_REG_RW;
+}
+
+#define PROVOKING_VERTEX_FN_MAX_SIZE 512
+
+static size_t
+generate_fn_set_fbds_provoking_vertex(struct panvk_device *dev,
+                                      struct cs_buffer fn_mem, bool has_zs_ext,
+                                      uint32_t rt_count,
+                                      uint32_t *dump_region_size)
+{
+   const struct drm_panthor_csif_info *csif_info =
+      panthor_kmod_get_csif_props(dev->kmod.dev);
+
+   struct cs_builder b;
+   struct cs_builder_conf conf = {
+      .nr_registers = csif_info->cs_reg_count,
+      .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
+      .reg_perm = provoking_vertex_fn_reg_perm_cb,
+   };
+   cs_builder_init(&b, &conf, fn_mem);
+
+   struct cs_function function;
+   struct cs_function_ctx function_ctx = {
+      .ctx_reg = cs_subqueue_ctx_reg(&b),
+      .dump_addr_offset =
+         offsetof(struct panvk_cs_subqueue_context, reg_dump_addr),
+   };
+
+   cs_function_def(&b, &function, function_ctx) {
+      uint32_t fbd_sz = get_fbd_size(has_zs_ext, rt_count);
+
+      /* argument passed in by the caller */
+      struct cs_index fbd_count = cs_scratch_reg32(&b, 0);
+
+      /* normal scratch regs */
+      struct cs_index scratch_reg = cs_scratch_reg32(&b, 1);
+      struct cs_index fbd_addr = cs_scratch_reg64(&b, 2);
+
+      cs_add64(&b, fbd_addr, cs_sr_reg64(&b, FRAGMENT, FBD_POINTER), 0);
+
+      cs_while(&b, MALI_CS_CONDITION_GREATER, fbd_count) {
+         /* provoking_vertex flag is bit 14 of word 11 */
+         unsigned offset = 11 * 4;
+         cs_load32_to(&b, scratch_reg, fbd_addr, offset);
+         cs_wait_slot(&b, SB_ID(LS), false);
+         cs_add32(&b, scratch_reg, scratch_reg, -(1 << 14));
+         cs_store32(&b, scratch_reg, fbd_addr, offset);
+         cs_wait_slot(&b, SB_ID(LS), false);
+
+         cs_add32(&b, fbd_count, fbd_count, -1);
+         cs_add64(&b, fbd_addr, fbd_addr, fbd_sz);
+      }
+   }
+
+   assert(cs_is_valid(&b));
+   cs_finish(&b);
+
+   *dump_region_size = function.dump_size;
+
+   return function.length * sizeof(uint64_t);
+}
+
+static uint32_t
+get_fn_set_fbds_provoking_vertex_idx(bool has_zs_ext, uint32_t rt_count)
+{
+   assert(rt_count >= 1 && rt_count <= MAX_RTS);
+   uint32_t idx = has_zs_ext * MAX_RTS + (rt_count - 1);
+   assert(idx < 2 * MAX_RTS);
+   return idx;
+}
+
+static uint32_t
+calc_fn_set_fbds_provoking_vertex_idx(struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
+   bool has_zs_ext = fb->zs.view.zs || fb->zs.view.s;
+   uint32_t rt_count = MAX2(fb->rt_count, 1);
+
+   return get_fn_set_fbds_provoking_vertex_idx(has_zs_ext, rt_count);
+}
+
+VkResult
+panvk_per_arch(device_draw_context_init)(struct panvk_device *dev)
+{
+   dev->draw_ctx = vk_alloc(&dev->vk.alloc,
+            sizeof(struct panvk_device_draw_context),
+            _Alignof(struct panvk_device_draw_context),
+            VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (dev->draw_ctx == NULL)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   VkResult result = panvk_priv_bo_create(
+      dev, PROVOKING_VERTEX_FN_MAX_SIZE * 2 * MAX_RTS, 0,
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &dev->draw_ctx->fns_bo);
+   if (result != VK_SUCCESS)
+      goto free_draw_ctx;
+
+   for (uint32_t has_zs_ext = 0; has_zs_ext <= 1; has_zs_ext++) {
+      for (uint32_t rt_count = 1; rt_count <= MAX_RTS; rt_count++) {
+         uint32_t idx =
+            get_fn_set_fbds_provoking_vertex_idx(has_zs_ext, rt_count);
+         /* Check that we have calculated a fn_stride if we need it to offset
+          * addresses. */
+         assert(idx == 0 ||
+                dev->draw_ctx->fn_set_fbds_provoking_vertex_stride != 0);
+         size_t offset =
+            idx * dev->draw_ctx->fn_set_fbds_provoking_vertex_stride;
+
+         struct cs_buffer fn_mem = {
+            .cpu = dev->draw_ctx->fns_bo->addr.host + offset,
+            .gpu = dev->draw_ctx->fns_bo->addr.dev + offset,
+            .capacity = PROVOKING_VERTEX_FN_MAX_SIZE / sizeof(uint64_t),
+         };
+
+         uint32_t dump_region_size;
+         size_t fn_length =
+            generate_fn_set_fbds_provoking_vertex(dev, fn_mem, has_zs_ext,
+                                                  rt_count, &dump_region_size);
+
+         /* All functions must have the same length */
+         assert(idx == 0 ||
+                fn_length == dev->draw_ctx->fn_set_fbds_provoking_vertex_stride);
+         dev->draw_ctx->fn_set_fbds_provoking_vertex_stride = fn_length;
+         dev->dump_region_size[PANVK_SUBQUEUE_VERTEX_TILER] =
+            MAX2(dev->dump_region_size[PANVK_SUBQUEUE_VERTEX_TILER],
+                 dump_region_size);
+      }
+   }
+
+   return VK_SUCCESS;
+
+free_draw_ctx:
+   vk_free(&dev->vk.alloc, dev->draw_ctx);
+   return result;
+}
+
+void
+panvk_per_arch(device_draw_context_cleanup)(struct panvk_device *dev)
+{
+   panvk_priv_bo_unref(dev->draw_ctx->fns_bo);
+   vk_free(&dev->vk.alloc, dev->draw_ctx);
+}
+
 static void
-emit_vs_attrib(const struct vk_vertex_attribute_state *attrib_info,
-               const struct vk_vertex_binding_state *buf_info,
-               const struct panvk_attrib_buf *buf, uint32_t vb_desc_offset,
+emit_vs_attrib(struct panvk_cmd_buffer *cmdbuf,
+               uint32_t attrib_idx, uint32_t vb_desc_offset,
                struct mali_attribute_packed *desc)
 {
+   const struct vk_vertex_input_state *vi =
+      cmdbuf->vk.dynamic_graphics_state.vi;
+   const struct vk_vertex_attribute_state *attrib_info =
+      &vi->attributes[attrib_idx];
+   const struct vk_vertex_binding_state *buf_info =
+      &vi->bindings[attrib_info->binding];
    bool per_instance = buf_info->input_rate == VK_VERTEX_INPUT_RATE_INSTANCE;
    enum pipe_format f = vk_format_to_pipe_format(attrib_info->format);
    unsigned buf_idx = vb_desc_offset + attrib_info->binding;
 
    pan_pack(desc, ATTRIBUTE, cfg) {
       cfg.offset = attrib_info->offset;
+
+      if (per_instance) {
+         cfg.offset +=
+            cmdbuf->state.gfx.sysvals.vs.base_instance * buf_info->stride;
+      }
+
       cfg.format = GENX(panfrost_format_from_pipe_format)(f)->hw;
       cfg.table = 0;
       cfg.buffer_index = buf_idx;
@@ -110,8 +270,19 @@ prepare_vs_driver_set(struct panvk_cmd_buffer *cmdbuf)
       cmdbuf->vk.dynamic_graphics_state.vi;
    uint32_t vb_count = 0;
 
-   u_foreach_bit(i, vi->attributes_valid)
+   cmdbuf->state.gfx.vi.attribs_changing_on_base_instance = 0;
+   u_foreach_bit(i, vi->attributes_valid) {
+      const struct vk_vertex_binding_state *binding =
+         &vi->bindings[vi->attributes[i].binding];
+
+      if (binding->input_rate == VK_VERTEX_INPUT_RATE_INSTANCE &&
+          binding->stride != 0) {
+         cmdbuf->state.gfx.vi.attribs_changing_on_base_instance |=
+            BITFIELD_BIT(i);
+      }
+
       vb_count = MAX2(vi->attributes[i].binding + 1, vb_count);
+   }
 
    uint32_t vb_offset = vs->desc_info.dyn_bufs.count + MAX_VS_ATTRIBS + 1;
    uint32_t desc_count = vb_offset + vb_count;
@@ -126,10 +297,7 @@ prepare_vs_driver_set(struct panvk_cmd_buffer *cmdbuf)
 
    for (uint32_t i = 0; i < MAX_VS_ATTRIBS; i++) {
       if (vi->attributes_valid & BITFIELD_BIT(i)) {
-         unsigned binding = vi->attributes[i].binding;
-
-         emit_vs_attrib(&vi->attributes[i], &vi->bindings[binding],
-                        &cmdbuf->state.gfx.vb.bufs[binding], vb_offset,
+         emit_vs_attrib(cmdbuf, i, vb_offset,
                         (struct mali_attribute_packed *)(&descs[i]));
       } else {
          memset(&descs[i], 0, sizeof(descs[0]));
@@ -197,35 +365,16 @@ emit_varying_descs(const struct panvk_cmd_buffer *cmdbuf,
       if (var->location < VARYING_SLOT_VAR0)
          continue;
 
-      /* We currently always write out F32 in the vertex shaders, so the format
-       * needs to reflect this. */
-      enum pipe_format f = var->format;
-      switch (f) {
-      case PIPE_FORMAT_R16_FLOAT:
-         f = PIPE_FORMAT_R32_FLOAT;
-         break;
-      case PIPE_FORMAT_R16G16_FLOAT:
-         f = PIPE_FORMAT_R32G32_FLOAT;
-         break;
-      case PIPE_FORMAT_R16G16B16_FLOAT:
-         f = PIPE_FORMAT_R32G32B32_FLOAT;
-         break;
-      case PIPE_FORMAT_R16G16B16A16_FLOAT:
-         f = PIPE_FORMAT_R32G32B32A32_FLOAT;
-         break;
-      default:
-         break;
-      }
-
       uint32_t loc = var->location - VARYING_SLOT_VAR0;
       pan_pack(&descs[i], ATTRIBUTE, cfg) {
          cfg.attribute_type = MALI_ATTRIBUTE_TYPE_VERTEX_PACKET;
          cfg.offset_enable = false;
-         cfg.format = GENX(panfrost_format_from_pipe_format)(f)->hw;
+         cfg.format = GENX(panfrost_format_from_pipe_format)(var->format)->hw;
          cfg.table = 61;
          cfg.frequency = MALI_ATTRIBUTE_FREQUENCY_VERTEX;
          cfg.offset = 1024 + (loc * 16);
-         cfg.buffer_index = 0;
+         /* On v12+, the hardware-controlled buffer is at index 1 for varyings */
+         cfg.buffer_index = PAN_ARCH >= 12 ? 1 : 0;
          cfg.attribute_stride = varying_size;
          cfg.packet_stride = varying_size + 16;
       }
@@ -422,8 +571,16 @@ update_tls(struct panvk_cmd_buffer *cmdbuf)
 
       cmdbuf->state.gfx.tsd = state->desc.gpu;
 
-      cs_update_vt_ctx(b)
-         cs_move64_to(b, cs_sr_reg64(b, 24), state->desc.gpu);
+      cs_update_vt_ctx(b) {
+#if PAN_ARCH >= 12
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_TSD),
+                      state->desc.gpu);
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, FRAGMENT_TSD),
+                      state->desc.gpu);
+#else
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, TSD_0), state->desc.gpu);
+#endif
+      }
    }
 
    state->info.tls.size =
@@ -461,15 +618,13 @@ prepare_blend(struct panvk_cmd_buffer *cmdbuf)
                 dyn_gfx_state_dirty(cmdbuf, CB_BLEND_EQUATIONS) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_WRITE_MASKS) ||
                 dyn_gfx_state_dirty(cmdbuf, CB_BLEND_CONSTANTS) ||
+                dyn_gfx_state_dirty(cmdbuf, COLOR_ATTACHMENT_MAP) ||
                 fs_user_dirty(cmdbuf) || gfx_state_dirty(cmdbuf, RENDER_STATE);
 
    if (!dirty)
       return VK_SUCCESS;
 
-   const struct vk_dynamic_graphics_state *dyns =
-      &cmdbuf->vk.dynamic_graphics_state;
-   const struct vk_color_blend_state *cb = &dyns->cb;
-   unsigned bd_count = MAX2(cb->attachment_count, 1);
+   uint32_t bd_count = MAX2(cmdbuf->state.gfx.render.fb.info.rt_count, 1);
    struct cs_builder *b =
       panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
    struct panfrost_ptr ptr =
@@ -482,11 +637,91 @@ prepare_blend(struct panvk_cmd_buffer *cmdbuf)
    panvk_per_arch(blend_emit_descs)(cmdbuf, bds);
 
    cs_update_vt_ctx(b)
-      cs_move64_to(b, cs_sr_reg64(b, 50), ptr.gpu | bd_count);
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, BLEND_DESC), ptr.gpu | bd_count);
 
    return VK_SUCCESS;
 }
 
+#if PAN_ARCH >= 12
+static void
+prepare_vp(struct panvk_cmd_buffer *cmdbuf)
+{
+   struct cs_builder *b =
+      panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
+   const VkViewport *viewport =
+      &cmdbuf->vk.dynamic_graphics_state.vp.viewports[0];
+   const VkRect2D *scissor = &cmdbuf->vk.dynamic_graphics_state.vp.scissors[0];
+
+   /* XXX: Switch scissor_array_enable to true and use array based variant
+    * for future proofness */
+
+   if (dyn_gfx_state_dirty(cmdbuf, VP_SCISSORS)) {
+      struct mali_scissor_packed scissor_box;
+      pan_pack(&scissor_box, SCISSOR, cfg) {
+         assert(scissor->offset.x >= 0 && scissor->offset.y >= 0);
+
+         int minx = scissor->offset.x;
+         int miny = scissor->offset.y;
+         int maxx = scissor->offset.x + scissor->extent.width;
+         int maxy = scissor->offset.y + scissor->extent.height;
+
+         /* Make sure we don't end up with a max < min when width/height is 0 */
+         maxx = maxx > minx ? maxx - 1 : maxx;
+         maxy = maxy > miny ? maxy - 1 : maxy;
+
+         /* Clamp scissor to valid range */
+         cfg.scissor_minimum_x = CLAMP(minx, 0, UINT16_MAX);
+         cfg.scissor_minimum_y = CLAMP(miny, 0, UINT16_MAX);
+         cfg.scissor_maximum_x = CLAMP(maxx, 0, UINT16_MAX);
+         cfg.scissor_maximum_y = CLAMP(maxy, 0, UINT16_MAX);
+      }
+
+      struct mali_scissor_packed *scissor_box_ptr = &scissor_box;
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, SCISSOR_BOX),
+                   *((uint64_t *)scissor_box_ptr));
+   }
+
+   if (dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
+       dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
+       dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLAMP_ENABLE)) {
+      struct mali_viewport_packed mali_viewport;
+      pan_pack(&mali_viewport, VIEWPORT, cfg) {
+         /* The spec says "width must be greater than 0.0" */
+         assert(viewport->width >= 0);
+         int minx = (int)viewport->x;
+         int maxx = (int)(viewport->x + viewport->width);
+
+         /* Viewport height can be negative */
+         int miny =
+            MIN2((int)viewport->y, (int)(viewport->y + viewport->height));
+         int maxy =
+            MAX2((int)viewport->y, (int)(viewport->y + viewport->height));
+
+         /* Make sure we don't end up with a max < min when width/height is 0 */
+         maxx = maxx > minx ? maxx - 1 : maxx;
+         maxy = maxy > miny ? maxy - 1 : maxy;
+
+         /* Clamp viewport to valid range */
+         cfg.min_x = CLAMP(minx, 0, UINT16_MAX);
+         cfg.min_y = CLAMP(miny, 0, UINT16_MAX);
+         cfg.max_x = CLAMP(maxx, 0, UINT16_MAX);
+         cfg.max_y = CLAMP(maxy, 0, UINT16_MAX);
+
+         struct panvk_graphics_sysvals *sysvals = &cmdbuf->state.gfx.sysvals;
+         float z_min = sysvals->viewport.offset.z;
+         float z_max = z_min + sysvals->viewport.scale.z;
+         cfg.min_depth = CLAMP(z_min, 0.0f, 1.0f);
+         cfg.max_depth = CLAMP(z_max, 0.0f, 1.0f);
+      }
+
+      uint64_t *mali_viewport_ptr = (uint64_t *)&mali_viewport;
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_HIGH),
+                   mali_viewport_ptr[0]);
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, VIEWPORT_LOW),
+                   mali_viewport_ptr[1]);
+   }
+}
+#else
 static void
 prepare_vp(struct panvk_cmd_buffer *cmdbuf)
 {
@@ -530,7 +765,8 @@ prepare_vp(struct panvk_cmd_buffer *cmdbuf)
       }
 
       struct mali_scissor_packed *scissor_box_ptr = &scissor_box;
-      cs_move64_to(b, cs_sr_reg64(b, 42), *((uint64_t*)scissor_box_ptr));
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, SCISSOR_BOX),
+                   *((uint64_t *)scissor_box_ptr));
    }
 
    if (dyn_gfx_state_dirty(cmdbuf, VP_VIEWPORTS) ||
@@ -540,13 +776,29 @@ prepare_vp(struct panvk_cmd_buffer *cmdbuf)
 
       float z_min = sysvals->viewport.offset.z;
       float z_max = z_min + sysvals->viewport.scale.z;
-      cs_move32_to(b, cs_sr_reg32(b, 44), fui(MIN2(z_min, z_max)));
-      cs_move32_to(b, cs_sr_reg32(b, 45), fui(MAX2(z_min, z_max)));
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, LOW_DEPTH_CLAMP),
+                   fui(MIN2(z_min, z_max)));
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, HIGH_DEPTH_CLAMP),
+                   fui(MAX2(z_min, z_max)));
    }
 }
+#endif
 
+#if PAN_ARCH >= 12
 static inline uint64_t
-get_pos_spd(const struct panvk_cmd_buffer *cmdbuf)
+get_vs_all_spd(const struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
+   assert(vs);
+   const struct vk_input_assembly_state *ia =
+      &cmdbuf->vk.dynamic_graphics_state.ia;
+   return ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+             ? panvk_priv_mem_dev_addr(vs->spds.all_points)
+             : panvk_priv_mem_dev_addr(vs->spds.all_triangles);
+}
+#else
+static inline uint64_t
+get_vs_pos_spd(const struct panvk_cmd_buffer *cmdbuf)
 {
    const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
    assert(vs);
@@ -556,13 +808,13 @@ get_pos_spd(const struct panvk_cmd_buffer *cmdbuf)
              ? panvk_priv_mem_dev_addr(vs->spds.pos_points)
              : panvk_priv_mem_dev_addr(vs->spds.pos_triangles);
 }
+#endif
 
 static void
 prepare_tiler_primitive_size(struct panvk_cmd_buffer *cmdbuf)
 {
    struct cs_builder *b =
       panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
    const struct vk_input_assembly_state *ia =
       &cmdbuf->vk.dynamic_graphics_state.ia;
    float primitive_size;
@@ -580,13 +832,16 @@ prepare_tiler_primitive_size(struct panvk_cmd_buffer *cmdbuf)
     *    points."
     *
     * If no point size is written, ensure that the size is always 1.0f.
+    * On v13+, the point size default to 1.0f.
     */
+#if PAN_ARCH < 13
    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
-      if (vs->info.vs.writes_point_size)
+      if (cmdbuf->state.gfx.vs.shader->info.vs.writes_point_size)
          return;
 
       primitive_size = 1.0f;
       break;
+#endif
    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
       primitive_size = cmdbuf->vk.dynamic_graphics_state.rs.line.width;
@@ -595,7 +850,13 @@ prepare_tiler_primitive_size(struct panvk_cmd_buffer *cmdbuf)
       return;
    }
 
-   cs_move32_to(b, cs_sr_reg32(b, 60), fui(primitive_size));
+#if PAN_ARCH >= 13
+   cs_move32_to(b, cs_sr_reg32(b, IDVS, LINE_WIDTH),
+                fui(primitive_size));
+#else
+   cs_move32_to(b, cs_sr_reg32(b, IDVS, PRIMITIVE_SIZE),
+                fui(primitive_size));
+#endif
 }
 
 static uint32_t
@@ -690,6 +951,8 @@ cs_render_desc_ringbuf_move_ptr(struct cs_builder *b, uint32_t size,
    cs_wait_slot(b, SB_ID(LS), false);
 }
 
+static bool get_first_provoking_vertex(struct panvk_cmd_buffer *cmdbuf);
+
 static VkResult
 get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
 {
@@ -727,16 +990,19 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
       unsigned max_levels = tiler_features.max_levels;
       assert(max_levels >= 2);
 
-      cfg.hierarchy_mask =
-         panvk_select_tiler_hierarchy_mask(phys_dev, &cmdbuf->state.gfx);
+      /* The tiler chunk start with a header of 64 bytes */
+      cfg.hierarchy_mask = panvk_select_tiler_hierarchy_mask(
+         phys_dev, &cmdbuf->state.gfx, phys_dev->csf.tiler.chunk_size - 64);
       cfg.fb_width = fbinfo->width;
       cfg.fb_height = fbinfo->height;
 
+#if PAN_ARCH >= 12
+      cfg.effective_tile_size = fbinfo->tile_size;
+#endif
+
       cfg.sample_pattern = pan_sample_pattern(fbinfo->nr_samples);
 
-      cfg.first_provoking_vertex =
-         cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
-            VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+      cfg.first_provoking_vertex = get_first_provoking_vertex(cmdbuf);
 
       /* This will be overloaded. */
       cfg.layer_count = 1;
@@ -751,7 +1017,7 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
    cmdbuf->state.gfx.render.tiler =
       simul_use ? 0xdeadbeefdeadbeefull : tiler_desc.gpu;
 
-   struct cs_index tiler_ctx_addr = cs_sr_reg64(b, 40);
+   struct cs_index tiler_ctx_addr = cs_sr_reg64(b, IDVS, TILER_CTX);
 
    if (simul_use) {
       uint32_t descs_sz = calc_render_descs_size(cmdbuf);
@@ -785,6 +1051,15 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
    cs_load_to(b, cs_scratch_reg_tuple(b, 6, 4), cs_subqueue_ctx_reg(b),
               BITFIELD_MASK(4),
               offsetof(struct panvk_cs_subqueue_context, render.tiler_heap));
+
+   /* If we don't know what provoking vertex mode the application wants yet,
+    * leave space to patch it later */
+   if (cmdbuf->state.gfx.render.first_provoking_vertex == U_TRISTATE_UNSET) {
+      cs_maybe(b, &cmdbuf->state.gfx.render.maybe_set_tds_provoking_vertex)
+         /* provoking_vertex flag is bit 18 of word 2 */
+         cs_add32(b, cs_scratch_reg32(b, 2), cs_scratch_reg32(b, 2),
+                  -(1 << 18));
+   }
 
    /* Fill extra fields with zeroes so we can reset the completed
     * top/bottom and private states. */
@@ -1034,6 +1309,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
    fbinfo->sample_positions =
       dev->sample_positions->addr.dev +
       panfrost_sample_positions_offset(pan_sample_pattern(fbinfo->nr_samples));
+   fbinfo->first_provoking_vertex = get_first_provoking_vertex(cmdbuf);
 
    VkResult result = panvk_per_arch(cmd_fb_preload)(cmdbuf, fbinfo);
    if (result != VK_SUCCESS)
@@ -1074,15 +1350,18 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
 
    struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_FRAGMENT);
 
+   bool unset_provoking_vertex =
+      cmdbuf->state.gfx.render.first_provoking_vertex == U_TRISTATE_UNSET;
+
    if (copy_fbds) {
-      struct cs_index cur_tiler = cs_sr_reg64(b, 38);
-      struct cs_index dst_fbd_ptr = cs_sr_reg64(b, 40);
-      struct cs_index layer_count = cs_sr_reg32(b, 47);
-      struct cs_index src_fbd_ptr = cs_sr_reg64(b, 48);
-      struct cs_index remaining_layers_in_td = cs_sr_reg32(b, 50);
-      struct cs_index pass_count = cs_sr_reg32(b, 51);
-      struct cs_index pass_src_fbd_ptr = cs_sr_reg64(b, 52);
-      struct cs_index pass_dst_fbd_ptr = cs_sr_reg64(b, 54);
+      struct cs_index cur_tiler = cs_reg64(b, 38);
+      struct cs_index dst_fbd_ptr = cs_sr_reg64(b, FRAGMENT, FBD_POINTER);
+      struct cs_index layer_count = cs_reg32(b, 47);
+      struct cs_index src_fbd_ptr = cs_reg64(b, 48);
+      struct cs_index remaining_layers_in_td = cs_reg32(b, 50);
+      struct cs_index pass_count = cs_reg32(b, 51);
+      struct cs_index pass_src_fbd_ptr = cs_reg64(b, 52);
+      struct cs_index pass_dst_fbd_ptr = cs_reg64(b, 54);
       uint32_t td_count = DIV_ROUND_UP(cmdbuf->state.gfx.render.layer_count,
                                        MAX_LAYERS_PER_TILER_DESC);
 
@@ -1114,6 +1393,15 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
                   cs_load_to(b, cs_scratch_reg_tuple(b, 0, 14),
                              pass_src_fbd_ptr, BITFIELD_MASK(14), fbd_off);
                   cs_add64(b, cs_scratch_reg64(b, 14), cur_tiler, 0);
+
+                  /* If we don't know what provoking vertex mode the
+                   * application wants yet, leave space to patch it later. */
+                  if (unset_provoking_vertex) {
+                     /* provoking_vertex flag is bit 14 of word 11 */
+                     struct cs_index word = cs_scratch_reg32(b, 11);
+                     cs_maybe(b, &cmdbuf->state.gfx.render.maybe_set_fbds_provoking_vertex)
+                        cs_add32(b, word, word, -(1 << 14));
+                  }
                } else {
                   cs_load_to(b, cs_scratch_reg_tuple(b, 0, 16),
                              pass_src_fbd_ptr, BITFIELD_MASK(16), fbd_off);
@@ -1159,29 +1447,89 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
       }
    } else {
       cs_update_frag_ctx(b) {
-         cs_move64_to(b, cs_sr_reg64(b, 40), fbds.gpu | fbd_flags);
-         cs_move64_to(b, cs_sr_reg64(b, 38), cmdbuf->state.gfx.render.tiler);
+         cs_move64_to(b, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
+                      fbds.gpu | fbd_flags);
+         cs_move64_to(b, cs_reg64(b, 38), cmdbuf->state.gfx.render.tiler);
+      }
+
+      /* If we don't know what provoking vertex mode the application wants yet,
+       * leave space to patch it later */
+      if (cmdbuf->state.gfx.render.first_provoking_vertex == U_TRISTATE_UNSET) {
+         uint32_t fbd_count = calc_enabled_layer_count(cmdbuf) *
+            (1 + PANVK_IR_PASS_COUNT);
+         /* passed to fn_set_fbds_provoking_vertex */
+         struct cs_index fbd_count_reg = cs_scratch_reg32(b, 0);
+         cs_move32_to(b, fbd_count_reg, fbd_count);
+
+         struct cs_index length_reg = cs_scratch_reg32(b, 1);
+         struct cs_index addr_reg = cs_scratch_reg64(b, 2);
+         uint32_t fn_idx = calc_fn_set_fbds_provoking_vertex_idx(cmdbuf);
+         uint32_t fn_stride =
+            dev->draw_ctx->fn_set_fbds_provoking_vertex_stride;
+         uint32_t fn_addr =
+            dev->draw_ctx->fns_bo->addr.dev + fn_idx * fn_stride;
+         cs_move64_to(b, addr_reg, fn_addr);
+         cs_move32_to(b, length_reg, fn_stride);
+
+         cs_maybe(b, &cmdbuf->state.gfx.render.maybe_set_fbds_provoking_vertex)
+            cs_call(b, addr_reg, length_reg);
       }
    }
 
    return VK_SUCCESS;
 }
 
-static void
-set_provoking_vertex_mode(struct panvk_cmd_buffer *cmdbuf)
+static bool
+get_first_provoking_vertex(struct panvk_cmd_buffer *cmdbuf)
 {
-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
-   bool first_provoking_vertex =
-      cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
-         VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+   switch (cmdbuf->state.gfx.render.first_provoking_vertex) {
+      case U_TRISTATE_NO:
+         return false;
+      case U_TRISTATE_YES:
+         return true;
+      /* If we don't know the provoking vertex mode yet, guess that it will
+       * be PROVOKING_VERTEX_MODE_FIRST. This is the vulkan default, and so
+       * likely to be right more often. */
+      case U_TRISTATE_UNSET:
+         return true;
+      default:
+         unreachable("Invalid u_tristate");
+   }
+}
 
-   /* If this is not the first draw, first_provoking_vertex should match
-    * the one from the previous draws. Unfortunately, we can't check it
-    * when the render pass is inherited. */
-   assert(!cmdbuf->state.gfx.render.fbds.gpu || inherits_render_ctx(cmdbuf) ||
-          fbinfo->first_provoking_vertex == first_provoking_vertex);
+static void
+set_provoking_vertex_mode(struct panvk_cmd_buffer *cmdbuf,
+                          enum u_tristate first_provoking_vertex)
+{
+   struct panvk_cmd_graphics_state *state = &cmdbuf->state.gfx;
 
-   fbinfo->first_provoking_vertex = first_provoking_vertex;
+   if (first_provoking_vertex != U_TRISTATE_UNSET) {
+      /* If this is not the first draw, first_provoking_vertex should match
+       * the one from the previous draws. Unfortunately, we can't check it
+       * when the render pass is inherited. */
+      assert(state->render.first_provoking_vertex == U_TRISTATE_UNSET ||
+             state->render.first_provoking_vertex == first_provoking_vertex);
+      state->render.first_provoking_vertex = first_provoking_vertex;
+   }
+
+   /* If the application uses PROVOKING_VERTEX_MODE_LAST after we previously
+    * emitted FBDs/TDs with the wrong mode set, patch the CS to flip the
+    * provoking vertex mode bits. */
+   if (state->render.first_provoking_vertex == U_TRISTATE_NO &&
+       state->render.maybe_set_tds_provoking_vertex)
+   {
+      struct cs_builder *b =
+         panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
+      cs_patch_maybe(b, state->render.maybe_set_tds_provoking_vertex);
+      state->render.maybe_set_tds_provoking_vertex = NULL;
+   }
+   if (state->render.first_provoking_vertex == U_TRISTATE_NO &&
+       state->render.maybe_set_fbds_provoking_vertex) {
+      struct cs_builder *b =
+         panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_FRAGMENT);
+      cs_patch_maybe(b, state->render.maybe_set_fbds_provoking_vertex);
+      state->render.maybe_set_fbds_provoking_vertex = NULL;
+   }
 }
 
 static VkResult
@@ -1220,15 +1568,22 @@ prepare_vs(struct panvk_cmd_buffer *cmdbuf)
 
    cs_update_vt_ctx(b) {
       if (upd_res_table)
-         cs_move64_to(b, cs_sr_reg64(b, 0), vs_desc_state->res_table);
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_SRT),
+                      vs_desc_state->res_table);
 
+#if PAN_ARCH >= 12
+      if (gfx_state_dirty(cmdbuf, VS))
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_SPD), get_vs_all_spd(cmdbuf));
+#else
       if (gfx_state_dirty(cmdbuf, VS) ||
           dyn_gfx_state_dirty(cmdbuf, IA_PRIMITIVE_TOPOLOGY))
-         cs_move64_to(b, cs_sr_reg64(b, 16), get_pos_spd(cmdbuf));
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_POS_SPD),
+                      get_vs_pos_spd(cmdbuf));
 
       if (gfx_state_dirty(cmdbuf, VS))
-         cs_move64_to(b, cs_sr_reg64(b, 18),
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_VARY_SPD),
                       panvk_priv_mem_dev_addr(vs->spds.var));
+#endif
    }
 
    return VK_SUCCESS;
@@ -1257,9 +1612,10 @@ prepare_fs(struct panvk_cmd_buffer *cmdbuf)
 
    cs_update_vt_ctx(b) {
       if (fs_user_dirty(cmdbuf) || gfx_state_dirty(cmdbuf, DESC_STATE))
-         cs_move64_to(b, cs_sr_reg64(b, 4), fs ? fs_desc_state->res_table : 0);
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, FRAGMENT_SRT),
+                      fs ? fs_desc_state->res_table : 0);
       if (fs_user_dirty(cmdbuf))
-         cs_move64_to(b, cs_sr_reg64(b, 20),
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, FRAGMENT_SPD),
                       fs ? panvk_priv_mem_dev_addr(fs->spd) : 0);
    }
 
@@ -1281,7 +1637,7 @@ prepare_push_uniforms(struct panvk_cmd_buffer *cmdbuf)
          return result;
 
       cs_update_vt_ctx(b) {
-         cs_move64_to(b, cs_sr_reg64(b, 8),
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, VERTEX_FAU),
                       cmdbuf->state.gfx.vs.push_uniforms |
                          ((uint64_t)vs->fau.total_count << 56));
       }
@@ -1300,14 +1656,14 @@ prepare_push_uniforms(struct panvk_cmd_buffer *cmdbuf)
       }
 
       cs_update_vt_ctx(b)
-         cs_move64_to(b, cs_sr_reg64(b, 12), fau_ptr);
+         cs_move64_to(b, cs_sr_reg64(b, IDVS, FRAGMENT_FAU), fau_ptr);
    }
 
    return VK_SUCCESS;
 }
 
 static VkResult
-prepare_ds(struct panvk_cmd_buffer *cmdbuf)
+prepare_ds(struct panvk_cmd_buffer *cmdbuf, struct pan_earlyzs_state earlyzs)
 {
    bool dirty = dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_TEST_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, DS_DEPTH_WRITE_ENABLE) ||
@@ -1321,7 +1677,9 @@ prepare_ds(struct panvk_cmd_buffer *cmdbuf)
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_CLIP_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_BIAS_ENABLE) ||
                 dyn_gfx_state_dirty(cmdbuf, RS_DEPTH_BIAS_FACTORS) ||
-                fs_user_dirty(cmdbuf);
+                dyn_gfx_state_dirty(cmdbuf, MS_ALPHA_TO_COVERAGE_ENABLE) ||
+                dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP) ||
+                fs_user_dirty(cmdbuf) || gfx_state_dirty(cmdbuf, OQ);
 
    if (!dirty)
       return VK_SUCCESS;
@@ -1370,8 +1728,15 @@ prepare_ds(struct panvk_cmd_buffer *cmdbuf)
       if (rs->depth_clamp_enable)
          cfg.depth_clamp_mode = MALI_DEPTH_CLAMP_MODE_BOUNDS;
 
-      if (fs)
+      if (fs) {
+#if PAN_ARCH == 10
+         cfg.shader_read_only_z_s = earlyzs.shader_readonly_zs;
+#elif PAN_ARCH == 11
+         cfg.separated_dependency_tracking = true;
+#endif
          cfg.depth_source = pan_depth_source(&fs->info);
+      }
+
       cfg.depth_write_enable = test_z && ds->depth.write_enable;
       cfg.depth_bias_enable = rs->depth_bias.enable;
       cfg.depth_function = test_z ? translate_compare_func(ds->depth.compare_op)
@@ -1382,7 +1747,7 @@ prepare_ds(struct panvk_cmd_buffer *cmdbuf)
    }
 
    cs_update_vt_ctx(b)
-      cs_move64_to(b, cs_sr_reg64(b, 52), zsd.gpu);
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, ZSD), zsd.gpu);
 
    return VK_SUCCESS;
 }
@@ -1459,7 +1824,8 @@ prepare_oq(struct panvk_cmd_buffer *cmdbuf)
 
    struct cs_builder *b =
       panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
-   cs_move64_to(b, cs_sr_reg64(b, 46), cmdbuf->state.gfx.occlusion_query.ptr);
+   cs_move64_to(b, cs_sr_reg64(b, IDVS, OQ),
+                cmdbuf->state.gfx.occlusion_query.ptr);
 
    cmdbuf->state.gfx.render.oq.last =
       cmdbuf->state.gfx.occlusion_query.syncobj;
@@ -1467,14 +1833,20 @@ prepare_oq(struct panvk_cmd_buffer *cmdbuf)
 }
 
 static void
-prepare_dcd(struct panvk_cmd_buffer *cmdbuf)
+prepare_dcd(struct panvk_cmd_buffer *cmdbuf,
+            struct pan_earlyzs_state *earlyzs)
 {
    struct cs_builder *b =
       panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER);
    const struct panvk_shader *fs = get_fs(cmdbuf);
+   bool dcd2_dirty =
+      fs_user_dirty(cmdbuf) ||
+      dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP) ||
+      dyn_gfx_state_dirty(cmdbuf, COLOR_ATTACHMENT_MAP);
    bool dcd0_dirty =
       dyn_gfx_state_dirty(cmdbuf, RS_RASTERIZER_DISCARD_ENABLE) ||
       dyn_gfx_state_dirty(cmdbuf, RS_CULL_MODE) ||
+      dyn_gfx_state_dirty(cmdbuf, RS_LINE_MODE) ||
       dyn_gfx_state_dirty(cmdbuf, RS_FRONT_FACE) ||
       dyn_gfx_state_dirty(cmdbuf, MS_RASTERIZATION_SAMPLES) ||
       dyn_gfx_state_dirty(cmdbuf, MS_SAMPLE_MASK) ||
@@ -1488,10 +1860,16 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf)
       dyn_gfx_state_dirty(cmdbuf, DS_STENCIL_TEST_ENABLE) ||
       dyn_gfx_state_dirty(cmdbuf, DS_STENCIL_OP) ||
       dyn_gfx_state_dirty(cmdbuf, DS_STENCIL_WRITE_MASK) ||
+      /* line mode needs primitive topology */
+      dyn_gfx_state_dirty(cmdbuf, IA_PRIMITIVE_TOPOLOGY) ||
+      dyn_gfx_state_dirty(cmdbuf, INPUT_ATTACHMENT_MAP) ||
       fs_user_dirty(cmdbuf) || gfx_state_dirty(cmdbuf, RENDER_STATE) ||
-      gfx_state_dirty(cmdbuf, OQ);
+      gfx_state_dirty(cmdbuf, OQ) || dcd2_dirty;
    bool dcd1_dirty = dyn_gfx_state_dirty(cmdbuf, MS_RASTERIZATION_SAMPLES) ||
                      dyn_gfx_state_dirty(cmdbuf, MS_SAMPLE_MASK) ||
+                     /* line mode needs primitive topology */
+                     dyn_gfx_state_dirty(cmdbuf, RS_LINE_MODE) ||
+                     dyn_gfx_state_dirty(cmdbuf, IA_PRIMITIVE_TOPOLOGY) ||
                      fs_user_dirty(cmdbuf) ||
                      gfx_state_dirty(cmdbuf, RENDER_STATE);
 
@@ -1499,33 +1877,66 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf)
       &cmdbuf->vk.dynamic_graphics_state;
    const struct vk_rasterization_state *rs =
       &cmdbuf->vk.dynamic_graphics_state.rs;
+   const struct vk_input_assembly_state *ia =
+      &cmdbuf->vk.dynamic_graphics_state.ia;
+
    bool alpha_to_coverage = dyns->ms.alpha_to_coverage_enable;
    bool writes_z = writes_depth(cmdbuf);
    bool writes_s = writes_stencil(cmdbuf);
+   uint8_t rt_mask = cmdbuf->state.gfx.render.bound_attachments &
+                     MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+   uint8_t rt_written = 0, rt_read = 0;
+
+   if (fs) {
+      rt_written = color_attachment_written_mask(fs, &dyns->cal);
+      rt_read = color_attachment_read_mask(fs, &dyns->ial, rt_mask);
+   }
+
+   bool msaa = dyns->ms.rasterization_samples > 1;
+   if ((ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+        ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) &&
+       rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM) {
+      /* we need to disable MSAA when rendering bresenham lines.
+       *
+       * From the Vulkan spec:
+       *   "When Bresenham lines are being rasterized, sample locations may
+       *    all be treated as being at the pixel center (this may affect
+       *    attribute and depth interpolation).""
+       */
+       msaa = false;
+   }
 
    if (dcd0_dirty) {
       struct mali_dcd_flags_0_packed dcd0;
       pan_pack(&dcd0, DCD_FLAGS_0, cfg) {
          if (fs) {
-            uint8_t rt_written = fs->info.outputs_written >> FRAG_RESULT_DATA0;
-            uint8_t rt_mask = cmdbuf->state.gfx.render.bound_attachments &
-                              MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+            enum pan_earlyzs_zs_tilebuf_read zs_read =
+               PAN_EARLYZS_ZS_TILEBUF_NOT_READ;
+
+            if (z_attachment_read(fs, &dyns->ial) ||
+                s_attachment_read(fs, &dyns->ial)) {
+               if (writes_z || writes_s || PAN_ARCH != 10)
+                  zs_read = PAN_EARLYZS_ZS_TILEBUF_READ_NO_OPT;
+               else
+                  zs_read = PAN_EARLYZS_ZS_TILEBUF_READ_OPT;
+            }
 
             cfg.allow_forward_pixel_to_kill =
                fs->info.fs.can_fpk && !(rt_mask & ~rt_written) &&
-               !alpha_to_coverage && !cmdbuf->state.gfx.cb.info.any_dest_read;
+               !(rt_read & rt_written) && !alpha_to_coverage &&
+               !cmdbuf->state.gfx.cb.info.any_dest_read;
 
             bool writes_zs = writes_z || writes_s;
             bool zs_always_passes = ds_test_always_passes(cmdbuf);
             bool oq = cmdbuf->state.gfx.occlusion_query.mode !=
                       MALI_OCCLUSION_MODE_DISABLED;
 
-            struct pan_earlyzs_state earlyzs =
-               pan_earlyzs_get(pan_earlyzs_analyze(&fs->info), writes_zs || oq,
-                               alpha_to_coverage, zs_always_passes);
+            *earlyzs =
+               pan_earlyzs_get(fs->fs.earlyzs_lut, writes_zs || oq,
+                               alpha_to_coverage, zs_always_passes, zs_read);
 
-            cfg.pixel_kill_operation = earlyzs.kill;
-            cfg.zs_update_operation = earlyzs.update;
+            cfg.pixel_kill_operation = (enum mali_pixel_kill)earlyzs->kill;
+            cfg.zs_update_operation = (enum mali_pixel_kill)earlyzs->update;
             cfg.evaluate_per_sample = fs->info.fs.sample_shading &&
                                       (dyns->ms.rasterization_samples > 1);
 
@@ -1541,25 +1952,26 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf)
             cfg.overdraw_alpha1 = true;
          }
 
+         if (rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM)
+            cfg.aligned_line_ends = true;
+
          cfg.front_face_ccw = rs->front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
          cfg.cull_front_face = (rs->cull_mode & VK_CULL_MODE_FRONT_BIT) != 0;
          cfg.cull_back_face = (rs->cull_mode & VK_CULL_MODE_BACK_BIT) != 0;
 
-         cfg.multisample_enable = dyns->ms.rasterization_samples > 1;
+         cfg.multisample_enable = msaa;
          cfg.occlusion_query = cmdbuf->state.gfx.occlusion_query.mode;
          cfg.alpha_to_coverage = alpha_to_coverage;
       }
 
       cs_update_vt_ctx(b)
-         cs_move32_to(b, cs_sr_reg32(b, 57), dcd0.opaque[0]);
+         cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD0), dcd0.opaque[0]);
    }
 
    if (dcd1_dirty) {
       struct mali_dcd_flags_1_packed dcd1;
       pan_pack(&dcd1, DCD_FLAGS_1, cfg) {
-         cfg.sample_mask = dyns->ms.rasterization_samples > 1
-                              ? dyns->ms.sample_mask
-                              : UINT16_MAX;
+         cfg.sample_mask = msaa ? dyns->ms.sample_mask : UINT16_MAX;
 
          if (fs) {
             cfg.render_target_mask =
@@ -1569,7 +1981,24 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf)
       }
 
       cs_update_vt_ctx(b)
-         cs_move32_to(b, cs_sr_reg32(b, 58), dcd1.opaque[0]);
+         cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD1), dcd1.opaque[0]);
+   }
+
+   if (dcd2_dirty) {
+      struct mali_dcd_flags_2_packed dcd2;
+      pan_pack(&dcd2, DCD_FLAGS_2, cfg) {
+         cfg.read_mask = rt_read;
+         cfg.write_mask = rt_written;
+#if PAN_ARCH >= 11
+         if (fs) {
+            cfg.no_shader_depth_read = !z_attachment_read(fs, &dyns->ial);
+            cfg.no_shader_stencil_read = !s_attachment_read(fs, &dyns->ial);
+         }
+#endif
+      }
+
+      cs_update_vt_ctx(b)
+         cs_move32_to(b, cs_sr_reg32(b, IDVS, DCD2), dcd2.opaque[0]);
    }
 }
 
@@ -1585,9 +2014,9 @@ prepare_index_buffer(struct panvk_cmd_buffer *cmdbuf,
          panvk_buffer_range(cmdbuf->state.gfx.ib.buffer,
                             cmdbuf->state.gfx.ib.offset, VK_WHOLE_SIZE);
       assert(ib_size <= UINT32_MAX);
-      cs_move32_to(b, cs_sr_reg32(b, 39), ib_size);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_BUFFER_SIZE), ib_size);
 
-      cs_move64_to(b, cs_sr_reg64(b, 54),
+      cs_move64_to(b, cs_sr_reg64(b, IDVS, INDEX_BUFFER),
                    panvk_buffer_gpu_ptr(cmdbuf->state.gfx.ib.buffer,
                                         cmdbuf->state.gfx.ib.offset));
    }
@@ -1630,9 +2059,12 @@ set_tiler_idvs_flags(struct cs_builder *b, struct panvk_cmd_buffer *cmdbuf,
       pan_pack(&tiler_idvs_flags, PRIMITIVE_FLAGS, cfg) {
          cfg.draw_mode = translate_prim_topology(ia->primitive_topology);
 
+#if PAN_ARCH < 13
          cfg.point_size_array_format = writes_point_size
             ? MALI_POINT_SIZE_ARRAY_FORMAT_FP16
             : MALI_POINT_SIZE_ARRAY_FORMAT_NONE;
+#endif
+
          cfg.layer_index_enable = writes_layer;
 
          cfg.position_fifo_format = extended_fifo
@@ -1647,7 +2079,14 @@ set_tiler_idvs_flags(struct cs_builder *b, struct panvk_cmd_buffer *cmdbuf,
          cfg.view_mask = cmdbuf->state.gfx.render.view_mask;
       }
 
-      cs_move32_to(b, cs_sr_reg32(b, 56), tiler_idvs_flags.opaque[0]);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, TILER_FLAGS), tiler_idvs_flags.opaque[0]);
+#if PAN_ARCH >= 11
+      struct mali_primitive_flags_2_packed tiler_flags_2;
+      pan_pack(&tiler_flags_2, PRIMITIVE_FLAGS_2, cfg) {
+      }
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, TILER_FLAGS2),
+                   tiler_flags_2.opaque[0]);
+#endif
    }
 }
 
@@ -1678,7 +2117,16 @@ prepare_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    /* FIXME: support non-IDVS. */
    assert(idvs);
 
-   set_provoking_vertex_mode(cmdbuf);
+   if (cmdbuf->state.gfx.vk_meta) {
+      /* vk_meta doesn't care about the provoking vertex mode, we should use
+       * the same mode that the application uses. */
+      set_provoking_vertex_mode(cmdbuf, U_TRISTATE_UNSET);
+   } else {
+      enum u_tristate first_provoking_vertex = u_tristate_make(
+         cmdbuf->vk.dynamic_graphics_state.rs.provoking_vertex ==
+         VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
+      set_provoking_vertex_mode(cmdbuf, first_provoking_vertex);
+   }
 
    result = update_tls(cmdbuf);
    if (result != VK_SUCCESS)
@@ -1708,6 +2156,14 @@ prepare_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    if (result != VK_SUCCESS)
       return result;
 
+   /* Changes to base_instance will modify the offset of per-instance
+    * attributes, so we manually invalidate the VI state to trigger a
+    * new attribute table generation in that case. */
+   if ((draw->instance.base != cmdbuf->state.gfx.sysvals.vs.base_instance ||
+        draw->indirect.buffer_dev_addr) &&
+       cmdbuf->state.gfx.vi.attribs_changing_on_base_instance != 0)
+      BITSET_SET(cmdbuf->vk.dynamic_graphics_state.dirty, MESA_VK_DYNAMIC_VI);
+
    panvk_per_arch(cmd_prepare_draw_sysvals)(cmdbuf, draw);
 
    result = prepare_push_uniforms(cmdbuf);
@@ -1726,16 +2182,17 @@ prepare_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    uint32_t varying_size = get_varying_slots(cmdbuf) * 16;
 
    cs_update_vt_ctx(b) {
-      /* We don't use the resource dep system yet. */
-      cs_move32_to(b, cs_sr_reg32(b, 38), 0);
-
       prepare_index_buffer(cmdbuf, draw);
 
       set_tiler_idvs_flags(b, cmdbuf, draw);
 
-      cs_move32_to(b, cs_sr_reg32(b, 48), varying_size);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, VARY_SIZE), varying_size);
 
-      result = prepare_ds(cmdbuf);
+      struct pan_earlyzs_state earlyzs = {0};
+
+      prepare_dcd(cmdbuf, &earlyzs);
+
+      result = prepare_ds(cmdbuf, earlyzs);
       if (result != VK_SUCCESS)
          return result;
 
@@ -1743,7 +2200,6 @@ prepare_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
       if (result != VK_SUCCESS)
          return result;
 
-      prepare_dcd(cmdbuf);
       prepare_vp(cmdbuf);
       prepare_tiler_primitive_size(cmdbuf);
    }
@@ -1763,7 +2219,7 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    VkResult result;
 
    /* If there's no vertex shader, we can skip the draw. */
-   if (!panvk_priv_mem_dev_addr(vs->spds.pos_points))
+   if (!panvk_priv_mem_dev_addr(vs->spd))
       return;
 
    /* Needs to be done before get_fs() is called because it depends on
@@ -1792,16 +2248,18 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
       return;
 
    cs_update_vt_ctx(b) {
-      cs_move32_to(b, cs_sr_reg32(b, 32), 0);
-      cs_move32_to(b, cs_sr_reg32(b, 33), draw->vertex.count);
-      cs_move32_to(b, cs_sr_reg32(b, 34), draw->instance.count);
-      cs_move32_to(b, cs_sr_reg32(b, 35), draw->index.offset);
-      cs_move32_to(b, cs_sr_reg32(b, 36), draw->vertex.base);
-      /* NIR expects zero-based instance ID, but even if it did have an intrinsic to
-       * load the absolute instance ID, we'd want to keep it zero-based to work around
-       * Mali's limitation on non-zero firstInstance when a instance divisor is used.
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, GLOBAL_ATTRIBUTE_OFFSET), 0);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_COUNT), draw->vertex.count);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_COUNT),
+                   draw->instance.count);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INDEX_OFFSET), draw->index.offset);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, VERTEX_OFFSET), draw->vertex.base);
+      /* NIR expects zero-based instance ID, but even if it did have an
+       * intrinsic to load the absolute instance ID, we'd want to keep it
+       * zero-based to work around Mali's limitation on non-zero firstInstance
+       * when a instance divisor is used.
        */
-      cs_move32_to(b, cs_sr_reg32(b, 37), 0);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
    }
 
    struct mali_primitive_flags_packed flags_override =
@@ -1813,15 +2271,21 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    cs_req_res(b, CS_IDVS_RES);
    if (idvs_count > 1) {
       struct cs_index counter_reg = cs_scratch_reg32(b, 17);
-      struct cs_index tiler_ctx_addr = cs_sr_reg64(b, 40);
+      struct cs_index tiler_ctx_addr = cs_sr_reg64(b, IDVS, TILER_CTX);
 
       cs_move32_to(b, counter_reg, idvs_count);
 
       cs_while(b, MALI_CS_CONDITION_GREATER, counter_reg) {
+#if PAN_ARCH >= 12
+         cs_trace_run_idvs2(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
+                            flags_override.opaque[0], false, true, cs_undef(),
+                            MALI_IDVS_SHADING_MODE_EARLY);
+#else
          cs_trace_run_idvs(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                            flags_override.opaque[0], false, true,
                            cs_shader_res_sel(0, 0, 1, 0),
                            cs_shader_res_sel(2, 2, 2, 0), cs_undef());
+#endif
 
          cs_add32(b, counter_reg, counter_reg, -1);
          cs_update_vt_ctx(b) {
@@ -1835,10 +2299,16 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
                   -(idvs_count * pan_size(TILER_CONTEXT)));
       }
    } else {
+#if PAN_ARCH >= 12
+      cs_trace_run_idvs2(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
+                        flags_override.opaque[0], false, true, cs_undef(),
+                        MALI_IDVS_SHADING_MODE_EARLY);
+#else
       cs_trace_run_idvs(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                         flags_override.opaque[0], false, true,
                         cs_shader_res_sel(0, 0, 1, 0),
                         cs_shader_res_sel(2, 2, 2, 0), cs_undef());
+#endif
    }
    cs_req_res(b, 0);
 }
@@ -1852,6 +2322,9 @@ panvk_per_arch(cmd_prepare_exec_cmd_for_draws)(
       return VK_SUCCESS;
 
    if (!inherits_render_ctx(primary)) {
+      enum u_tristate first_provoking_vertex =
+         secondary->state.gfx.render.first_provoking_vertex;
+      set_provoking_vertex_mode(primary, first_provoking_vertex);
       VkResult result  = get_render_ctx(primary);
       if (result != VK_SUCCESS)
          return result;
@@ -1927,7 +2400,7 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
    VkResult result;
 
    /* If there's no vertex shader, we can skip the draw. */
-   if (!panvk_priv_mem_dev_addr(vs->spds.pos_points))
+   if (!panvk_priv_mem_dev_addr(vs->spd))
       return;
 
    /* Needs to be done before get_fs() is called because it depends on
@@ -1974,14 +2447,21 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
    if (result != VK_SUCCESS)
       return;
 
+   uint32_t patch_attribs =
+      cmdbuf->state.gfx.vi.attribs_changing_on_base_instance;
    struct cs_index draw_params_addr = cs_scratch_reg64(b, 0);
+   struct cs_index vs_drv_set = cs_scratch_reg64(b, 2);
+   struct cs_index attrib_offset = cs_scratch_reg32(b, 4);
+   struct cs_index multiplicand = cs_scratch_reg32(b, 5);
+
    cs_move64_to(b, draw_params_addr, draw->indirect.buffer_dev_addr);
 
    cs_update_vt_ctx(b) {
-      cs_move32_to(b, cs_sr_reg32(b, 32), 0);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, GLOBAL_ATTRIBUTE_OFFSET), 0);
       /* Load SR33-37 from indirect buffer. */
       unsigned reg_mask = draw->index.size ? 0b11111 : 0b11011;
-      cs_load_to(b, cs_sr_reg_tuple(b, 33, 5), draw_params_addr, reg_mask, 0);
+      cs_load_to(b, cs_sr_reg_tuple(b, IDVS, INDEX_COUNT, 5),
+                 draw_params_addr, reg_mask, 0);
    }
 
    /* Wait for the SR33-37 indirect buffer load. */
@@ -1993,13 +2473,13 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
       cs_move64_to(b, fau_block_addr, cmdbuf->state.gfx.vs.push_uniforms);
 
       if (shader_uses_sysval(vs, graphics, vs.first_vertex)) {
-         cs_store32(b, cs_sr_reg32(b, 36), fau_block_addr,
+         cs_store32(b, cs_sr_reg32(b, IDVS, VERTEX_OFFSET), fau_block_addr,
                     shader_remapped_sysval_offset(
                        vs, sysval_offset(graphics, vs.first_vertex)));
       }
 
       if (shader_uses_sysval(vs, graphics, vs.base_instance)) {
-         cs_store32(b, cs_sr_reg32(b, 37), fau_block_addr,
+         cs_store32(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), fau_block_addr,
                     shader_remapped_sysval_offset(
                        vs, sysval_offset(graphics, vs.base_instance)));
       }
@@ -2009,21 +2489,81 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
       cs_wait_slot(b, SB_ID(LS), false);
    }
 
+   if (patch_attribs != 0) {
+      struct panvk_shader_desc_state *vs_desc_state =
+         &cmdbuf->state.gfx.vs.desc;
+      const struct vk_vertex_input_state *vi =
+         cmdbuf->vk.dynamic_graphics_state.vi;
+
+      cs_move64_to(b, vs_drv_set, vs_desc_state->driver_set.dev_addr);
+
+      /* If firstInstance=0, skip the offset adjustment. */
+      cs_if(b, MALI_CS_CONDITION_NEQUAL,
+            cs_sr_reg32(b, IDVS, INSTANCE_OFFSET)) {
+         u_foreach_bit(i, patch_attribs) {
+            const struct vk_vertex_attribute_state *attrib_info =
+               &vi->attributes[i];
+            const struct vk_vertex_binding_state *binding =
+               &vi->bindings[attrib_info->binding];
+
+            cs_load32_to(b, attrib_offset, vs_drv_set,
+                         pan_size(ATTRIBUTE) * i + (2 * sizeof(uint32_t)));
+            cs_wait_slot(b, SB_ID(LS), false);
+
+            /* Emulated immediate multiply: we walk the bits in
+             * base_instance, and accumulate (stride << bit_pos) if the bit
+             * is present. This is sub-optimal, but it's simple :-). */
+            cs_add32(b, multiplicand, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
+            for (uint32_t i = 31; i > 0; i--) {
+               uint32_t add = binding->stride << i;
+
+               /* bit31 is the sign bit, so we don't need to subtract to
+                * check the presence of the bit. */
+               if (i < 31)
+                  cs_add32(b, multiplicand, multiplicand, -(1 << i));
+
+               if (add) {
+                  cs_if(b, MALI_CS_CONDITION_LESS, multiplicand)
+                     cs_add32(b, multiplicand, multiplicand, 1 << i);
+                  cs_else(b)
+                     cs_add32(b, attrib_offset, attrib_offset, add);
+               } else {
+                  cs_if(b, MALI_CS_CONDITION_LESS, multiplicand)
+                     cs_add32(b, multiplicand, multiplicand, 1 << i);
+               }
+            }
+
+            cs_if(b, MALI_CS_CONDITION_NEQUAL, multiplicand)
+               cs_add32(b, attrib_offset, attrib_offset, binding->stride);
+
+            cs_store32(b, attrib_offset, vs_drv_set,
+                       pan_size(ATTRIBUTE) * i + (2 * sizeof(uint32_t)));
+            cs_wait_slot(b, SB_ID(LS), false);
+         }
+      }
+   }
+
    /* NIR expects zero-based instance ID, but even if it did have an intrinsic to
     * load the absolute instance ID, we'd want to keep it zero-based to work around
     * Mali's limitation on non-zero firstInstance when a instance divisor is used.
     */
    cs_update_vt_ctx(b)
-      cs_move32_to(b, cs_sr_reg32(b, 37), 0);
+      cs_move32_to(b, cs_sr_reg32(b, IDVS, INSTANCE_OFFSET), 0);
 
    struct mali_primitive_flags_packed flags_override =
       get_tiler_flags_override(draw);
 
    cs_req_res(b, CS_IDVS_RES);
+#if PAN_ARCH >= 12
+   cs_trace_run_idvs2(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
+                     flags_override.opaque[0], false, true, cs_undef(),
+                     MALI_IDVS_SHADING_MODE_EARLY);
+#else
    cs_trace_run_idvs(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
                      flags_override.opaque[0], false, true,
                      cs_shader_res_sel(0, 0, 1, 0),
                      cs_shader_res_sel(2, 2, 2, 0), cs_undef());
+#endif
    cs_req_res(b, 0);
 }
 
@@ -2097,6 +2637,9 @@ panvk_per_arch(cmd_inherit_render_state)(
       to_panvk_physical_device(dev->vk.physical);
    struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
 
+   cmdbuf->state.gfx.render.first_provoking_vertex = U_TRISTATE_UNSET;
+   cmdbuf->state.gfx.render.maybe_set_tds_provoking_vertex = NULL;
+   cmdbuf->state.gfx.render.maybe_set_fbds_provoking_vertex = NULL;
    cmdbuf->state.gfx.render.suspended = false;
    cmdbuf->state.gfx.render.flags = inheritance_info->flags;
 
@@ -2117,6 +2660,7 @@ panvk_per_arch(cmd_inherit_render_state)(
       0;
    *fbinfo = (struct pan_fb_info){
       .tile_buf_budget = panfrost_query_optimal_tib_size(phys_dev->model),
+      .z_tile_buf_budget = panfrost_query_optimal_z_tib_size(phys_dev->model),
       .nr_samples = inheritance_info->rasterizationSamples,
       .rt_count = inheritance_info->colorAttachmentCount,
    };
@@ -2286,17 +2830,17 @@ setup_tiler_oom_ctx(struct panvk_cmd_buffer *cmdbuf)
               TILER_OOM_CTX_FIELD_OFFSET(counter));
 
    struct cs_index fbd_first = cs_scratch_reg64(b, 2);
-   cs_add64(b, fbd_first, cs_sr_reg64(b, 40),
+   cs_add64(b, fbd_first, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
             (1 + PANVK_IR_FIRST_PASS) * fbd_ir_pass_offset);
    cs_store64(b, fbd_first, cs_subqueue_ctx_reg(b),
               TILER_OOM_CTX_FBDPTR_OFFSET(FIRST));
    struct cs_index fbd_middle = cs_scratch_reg64(b, 4);
-   cs_add64(b, fbd_middle, cs_sr_reg64(b, 40),
+   cs_add64(b, fbd_middle, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
             (1 + PANVK_IR_MIDDLE_PASS) * fbd_ir_pass_offset);
    cs_store64(b, fbd_middle, cs_subqueue_ctx_reg(b),
               TILER_OOM_CTX_FBDPTR_OFFSET(MIDDLE));
    struct cs_index fbd_last = cs_scratch_reg64(b, 6);
-   cs_add64(b, fbd_last, cs_sr_reg64(b, 40),
+   cs_add64(b, fbd_last, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
             (1 + PANVK_IR_LAST_PASS) * fbd_ir_pass_offset);
    cs_store64(b, fbd_last, cs_subqueue_ctx_reg(b),
               TILER_OOM_CTX_FBDPTR_OFFSET(LAST));
@@ -2330,9 +2874,9 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 
    /* Now initialize the fragment bits. */
    cs_update_frag_ctx(b) {
-      cs_move32_to(b, cs_sr_reg32(b, 42),
+      cs_move32_to(b, cs_sr_reg32(b, FRAGMENT, BBOX_MIN),
                    (fbinfo->extent.miny << 16) | fbinfo->extent.minx);
-      cs_move32_to(b, cs_sr_reg32(b, 43),
+      cs_move32_to(b, cs_sr_reg32(b, FRAGMENT, BBOX_MAX),
                    (fbinfo->extent.maxy << 16) | fbinfo->extent.maxx);
    }
 
@@ -2400,7 +2944,8 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
    cs_wait_slot(b, SB_ID(LS), false);
    cs_if(b, MALI_CS_CONDITION_GREATER, counter)
       cs_update_frag_ctx(b)
-         cs_add64(b, cs_sr_reg64(b, 40), cs_sr_reg64(b, 40),
+         cs_add64(b, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
+                  cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
                   (1 + PANVK_IR_LAST_PASS) * fbd_ir_pass_offset);
 
    /* Applications tend to forget to describe subpass dependencies, especially
@@ -2410,14 +2955,15 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
     * v13+. We don't do that in panvk, but we provide a debug flag to help
     * identify those issues. */
    if (unlikely(instance->debug_flags & PANVK_DEBUG_IMPLICIT_OTHERS_INV)) {
-      cs_flush_caches(b, 0, 0, true, length_reg,
+      cs_flush_caches(b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
+                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, length_reg,
                       cs_defer(0x0, SB_ID(IMM_FLUSH)));
       cs_wait_slot(b, SB_ID(IMM_FLUSH), false);
    }
 
    cs_req_res(b, CS_FRAG_RES);
    if (cmdbuf->state.gfx.render.layer_count > 1) {
-      struct cs_index layer_count = cs_sr_reg32(b, 47);
+      struct cs_index layer_count = cs_reg32(b, 47);
 
       cs_move32_to(b, layer_count, calc_enabled_layer_count(cmdbuf));
       cs_while(b, MALI_CS_CONDITION_GREATER, layer_count) {
@@ -2426,7 +2972,8 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 
          cs_add32(b, layer_count, layer_count, -1);
          cs_update_frag_ctx(b)
-            cs_add64(b, cs_sr_reg64(b, 40), cs_sr_reg64(b, 40), fbd_sz);
+            cs_add64(b, cs_sr_reg64(b, FRAGMENT, FBD_POINTER),
+                     cs_sr_reg64(b, FRAGMENT, FBD_POINTER), fbd_sz);
       }
    } else {
       cs_trace_run_fragment(b, tracing_ctx, cs_scratch_reg_tuple(b, 0, 4),
@@ -2445,8 +2992,8 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
    struct cs_index completed = cs_scratch_reg_tuple(b, 10, 4);
    struct cs_index completed_top = cs_scratch_reg64(b, 10);
    struct cs_index completed_bottom = cs_scratch_reg64(b, 12);
-   struct cs_index cur_tiler = cs_sr_reg64(b, 38);
-   struct cs_index tiler_count = cs_sr_reg32(b, 47);
+   struct cs_index cur_tiler = cs_reg64(b, 38);
+   struct cs_index tiler_count = cs_reg32(b, 47);
    struct cs_index oq_chain = cs_scratch_reg64(b, 10);
    struct cs_index oq_chain_lo = cs_scratch_reg32(b, 10);
    struct cs_index oq_chain_hi = cs_scratch_reg32(b, 11);
@@ -2499,7 +3046,8 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
          struct cs_index flush_id = oq_chain_lo;                               \
          cs_move32_to(b, flush_id, 0);                                         \
          cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN,                          \
-                         MALI_CS_FLUSH_MODE_CLEAN, false, flush_id,            \
+                         MALI_CS_FLUSH_MODE_CLEAN,                             \
+                         MALI_CS_OTHER_FLUSH_MODE_NONE, flush_id,              \
                          cs_defer(SB_WAIT_ITER(x), SB_ID(DEFERRED_FLUSH)));    \
          cs_load64_to(                                                         \
             b, oq_chain, cs_subqueue_ctx_reg(b),                               \
@@ -2573,7 +3121,8 @@ panvk_per_arch(cmd_flush_draws)(struct panvk_cmd_buffer *cmdbuf)
 
       /* We inherited the render context, and need to let the primary command
        * buffer know that it's changed. */
-      cmdbuf->state.gfx.render.invalidate_inherited_ctx = true;
+      cmdbuf->state.gfx.render.invalidate_inherited_ctx =
+         inherits_render_ctx(cmdbuf);
 
       /* Re-emit the FB/Tiler descs if we inherited them. */
       if (inherits_render_ctx(cmdbuf))

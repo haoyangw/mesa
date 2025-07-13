@@ -366,7 +366,7 @@ dst.x |= ((uint32_t) pack_fmt_1x8(src0.w)) << 24;
 def unpack_2x16(fmt):
    unop_horiz("unpack_" + fmt + "_2x16", 2, tfloat32, 1, tuint32, """
 dst.x = unpack_fmt_1x16((uint16_t)(src0.x & 0xffff));
-dst.y = unpack_fmt_1x16((uint16_t)(src0.x << 16));
+dst.y = unpack_fmt_1x16((uint16_t)(src0.x >> 16));
 """.replace("fmt", fmt))
 
 def unpack_4x8(fmt):
@@ -1412,6 +1412,11 @@ opcode("prmt_nv", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],
         dst |= ((uint32_t)x) << i * 8;
     }""")
 
+# Address arithmetic instructions: shift and add
+# Shift must be a constant.
+opcode("lea_nv", 0, tuint, [0, 0, 0], [tuint, tuint, tuint32], False,
+       "", "src0 + (src1 << (src2 % bit_size))")
+
 # 24b multiply into 32b result (with sign extension)
 binop("imul24", tint32, _2src_commutative + associative,
       "(((int32_t)src0 << 8) >> 8) * (((int32_t)src1 << 8) >> 8)")
@@ -1432,6 +1437,16 @@ binop("umul24_relaxed", tuint32, _2src_commutative + associative, "src0 * src1")
 unop_convert("fisnormal", tbool1, tfloat, "isnormal(src0)")
 unop_convert("fisfinite", tbool1, tfloat, "isfinite(src0)")
 unop_convert("fisfinite32", tbool32, tfloat, "isfinite(src0)")
+
+# panfrost-specific opcodes
+
+# 16-bit ldexp with 16-bit exponent for bifrost
+opcode("ldexp16_pan", 0, tfloat16, [0, 0], [tfloat16, tint16], False, "", """
+dst = ldexpf(src0, src1);
+/* flush denormals to zero. */
+if (!isnormal(dst))
+   dst = copysignf(0.0f, src0);
+""")
 
 # vc4-specific opcodes
 

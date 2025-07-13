@@ -114,6 +114,8 @@ struct tu_physical_device
    uint32_t vpc_attr_buf_offset_bypass;
    uint32_t vpc_attr_buf_size_bypass;
 
+   uint64_t uche_trap_base;
+
    /* Amount of usable descriptor sets, this excludes any reserved set */
    uint32_t usable_sets;
    /* Index of the reserved descriptor set, may be -1 if unset */
@@ -204,6 +206,9 @@ struct tu_instance
     * UBWC to be enabled.
     */
    bool disable_d24s8_border_color_workaround;
+
+   /* D3D emulation requires texture coordinates to be rounded to nearest even value. */
+   bool use_tex_coord_round_nearest_even_mode;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
@@ -335,6 +340,11 @@ struct tu_device
    struct tu_suballocator kgsl_profiling_suballoc;
    mtx_t kgsl_profiling_mutex;
 
+   /* VkEvent BO suballocator.  Synchronized by event_mutex.
+    */
+   struct tu_suballocator event_suballoc;
+   mtx_t event_mutex;
+
    /* the blob seems to always use 8K factor and 128K param sizes, copy them */
 #define TU_TESS_FACTOR_SIZE (8 * 1024)
 #define TU_TESS_PARAM_SIZE (128 * 1024)
@@ -457,29 +467,33 @@ struct tu_attachment_info
    struct tu_image_view *attachment;
 };
 
-struct tu_tiling_config {
-   /* size of the first tile */
-   VkExtent2D tile0;
+struct tu_vsc_config {
    /* number of tiles */
    VkExtent2D tile_count;
-
    /* size of the first VSC pipe */
    VkExtent2D pipe0;
    /* number of VSC pipes */
    VkExtent2D pipe_count;
 
-   /* Whether using GMEM is even possible with this configuration */
-   bool possible;
+   /* Whether binning could be used for gmem rendering using this framebuffer. */
+   bool binning_possible;
 
    /* Whether binning should be used for gmem rendering using this framebuffer. */
    bool binning;
 
-   /* Whether binning could be used for gmem rendering using this framebuffer. */
-   bool binning_possible;
-
    /* pipe register values */
    uint32_t pipe_config[MAX_VSC_PIPES];
    uint32_t pipe_sizes[MAX_VSC_PIPES];
+};
+
+struct tu_tiling_config {
+   /* size of the first tile */
+   VkExtent2D tile0;
+
+   /* Whether using GMEM is even possible with this configuration */
+   bool possible;
+
+   struct tu_vsc_config vsc, fdm_offset_vsc;
 };
 
 struct tu_framebuffer

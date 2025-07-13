@@ -58,6 +58,12 @@
          .end = { ._int = max },                \
       }                                         \
 
+#define DRI_CONF_RANGE_U64(min, max)            \
+      .range = {                                \
+         .start = { ._uint64 = min },           \
+         .end = { ._uint64 = max },             \
+      }
+
 #define DRI_CONF_RANGE_F(min, max)              \
       .range = {                                \
          .start = { ._float = min },            \
@@ -86,6 +92,16 @@
          DRI_CONF_RANGE_I(min, max),                            \
       },                                                        \
       .value = { ._int = def },                                 \
+   },
+
+#define DRI_CONF_OPT_U64(_name, def, min, max, _desc) {         \
+      .desc = _desc,                                            \
+      .info = {                                                 \
+         .name = #_name,                                        \
+         .type = DRI_UINT64,                                    \
+         DRI_CONF_RANGE_U64(min, max),                          \
+      },                                                        \
+      .value = { ._uint64 = def },                                 \
    },
 
 #define DRI_CONF_OPT_F(_name, def, min, max, _desc) {           \
@@ -275,6 +291,9 @@
 #define DRI_CONF_FORCE_GL_MAP_BUFFER_SYNCHRONIZED(def) \
    DRI_CONF_OPT_B(force_gl_map_buffer_synchronized, def, "Override GL_MAP_UNSYNCHRONIZED_BIT.")
 
+#define DRI_CONF_FORCE_GL_DEPTH_COMPONENT_TYPE_INT(def) \
+   DRI_CONF_OPT_B(force_gl_depth_component_type_int, def, "Override GL_DEPTH_COMPONENT type from unsigned short to unsigned int")
+
 #define DRI_CONF_TRANSCODE_ETC(def) \
    DRI_CONF_OPT_B(transcode_etc, def, "Transcode ETC formats to DXTC if unsupported")
 
@@ -326,6 +345,18 @@
 #define DRI_CONF_FAKE_SPARSE(def) \
    DRI_CONF_OPT_B(fake_sparse, def, \
                   "Advertise support for sparse binding of textures regardless of real support")
+
+#define DRI_CONFIG_INTEL_TBIMR(def) \
+   DRI_CONF_OPT_B(intel_tbimr, def, "Enable TBIMR tiled rendering")
+
+#define DRI_CONFIG_INTEL_VF_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_vf_distribution, def, "Enable geometry distribution")
+
+#define DRI_CONFIG_INTEL_TE_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_te_distribution, def, "Enable tesselation distribution")
+
+#define DRI_CONFIG_INTEL_STORAGE_CACHE_POLICY_WT(def) \
+   DRI_CONF_OPT_B(intel_storage_cache_policy_wt, def, "Enable write-through cache policy for storage buffers/images.")
 
 #define DRI_CONF_INTEL_ENABLE_WA_14018912822(def) \
    DRI_CONF_OPT_B(intel_enable_wa_14018912822, def, \
@@ -614,6 +645,18 @@
                   "Disable conservative LRZ")
 
 /**
+ * \brief panfrost specific configuration options
+ */
+
+#define DRI_CONF_PAN_COMPUTE_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_compute_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for compute jobs. If unset, defaults to scheduling across all available cores.")
+
+#define DRI_CONF_PAN_FRAGMENT_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_fragment_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for fragment jobs. If unset, defaults to scheduling across all available cores.")
+
+/**
  * \brief Turnip specific configuration options
  */
 
@@ -629,6 +672,10 @@
    DRI_CONF_OPT_B(tu_disable_d24s8_border_color_workaround, def, \
                   "Use UBWC for D24S8 images with VK_IMAGE_USAGE_SAMPLED_BIT when customBorderColorWithoutFormat is enabled")
 
+#define DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(def) \
+   DRI_CONF_OPT_B(tu_use_tex_coord_round_nearest_even_mode, def, \
+                  "Use D3D-compliant round-to-nearest-even mode for texture coordinates")
+
 /**
  * \brief Honeykrisp specific configuration options
  */
@@ -640,6 +687,10 @@
 #define DRI_CONF_HK_DISABLE_RGBA4_BORDER_COLOR_WORKAROUND(def) \
    DRI_CONF_OPT_B(hk_disable_rgba4_border_color_workaround, def, \
                   "Use hardware opaque_black, breaking certain RGBA4 formats")
+
+#define DRI_CONF_HK_FAKE_MINMAX(def) \
+   DRI_CONF_OPT_B(hk_fake_minmax, def, \
+                  "Fake support for min/max filtering")
 
 /**
  * \brief venus specific configuration options
@@ -702,7 +753,7 @@
 
 #define DRI_CONF_RADV_DISABLE_DCC_STORES(def) \
    DRI_CONF_OPT_B(radv_disable_dcc_stores, def, \
-                  "Disable DCC for color storage images")
+                  "Disable DCC for color storage images on GFX10-GFX11.5")
 
 #define DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(def) \
    DRI_CONF_OPT_B(radv_lower_terminate_to_discard, def, \
@@ -749,13 +800,9 @@
    DRI_CONF_OPT_B(radv_rt_wave64, def, \
                   "Force wave64 in RT shaders")
 
-#define DRI_CONF_RADV_LEGACY_SPARSE_BINDING(def) \
-   DRI_CONF_OPT_B(radv_legacy_sparse_binding, def, \
-                  "Enable legacy sparse binding (with implicit synchronization) on the graphics and compute queue")
-
-#define DRI_CONF_RADV_FORCE_PSTATE_PEAK_GFX11_DGPU(def) \
-   DRI_CONF_OPT_B(radv_force_pstate_peak_gfx11_dgpu, def, \
-                  "Force the performance level to profile_peak (all clocks to the highest levels) for RDNA3 dGPUs")
+#define DRI_CONF_RADV_DISABLE_DEDICATED_SPARSE_QUEUE(def) \
+   DRI_CONF_OPT_B(radv_disable_dedicated_sparse_queue, def, \
+                  "Disables the dedicated sparse queue. This replaces radv_legacy_sparse_binding as a compatible drirc workaround for games that might not expect a separate SPARSE queue")
 
 /**
  * Overrides for forcing re-compilation of pipelines when RADV_BUILD_ID_OVERRIDE is enabled.
@@ -781,6 +828,22 @@
 
 #define DRI_CONF_RADV_DISABLE_NGG_GS(def) \
    DRI_CONF_OPT_B(radv_disable_ngg_gs, def, "Disable NGG GS on GFX10/GFX10.3.")
+
+#define DRI_CONF_RADV_EMULATE_RT(def) \
+   DRI_CONF_OPT_B(radv_emulate_rt, def, \
+                  "Expose RT extensions on GFX10 and below through software emulation.")
+
+#define DRI_CONF_RADV_ENABLE_FLOAT16_GFX8(def) \
+   DRI_CONF_OPT_B(radv_enable_float16_gfx8, def, \
+                  "Expose float16 on GFX8, where it's supported but usually not beneficial.")
+
+#define DRI_CONF_RADV_FORCE_64K_SPARSE_ALIGNMENT(def) \
+   DRI_CONF_OPT_B(radv_force_64k_sparse_alignment, def, \
+                  "Force the alignment of sparse buffers to 64KiB")
+
+#define DRI_CONF_RADV_DISABLE_HIZ_HIS_GFX12(def) \
+   DRI_CONF_OPT_B(radv_disable_hiz_his_gfx12, def, \
+                  "Disable HiZ/HiS on GFX12 (RDNA4) to workaround a hw bug that causes random GPU hangs")
 
 /**
  * \brief ANV specific configuration options
@@ -860,6 +923,10 @@
 #define DRI_CONF_ANV_UPPER_BOUND_DESCRIPTOR_POOL_SAMPLER(def) \
    DRI_CONF_OPT_B(anv_upper_bound_descriptor_pool_sampler, def, \
                   "Overallocate samplers in descriptor pools to workaround app bug")
+
+#define DRI_CONF_ANV_VF_COMPONENT_PACKING(def) \
+   DRI_CONF_OPT_B(anv_vf_component_packing, def, \
+                  "Vertex fetching component packing")
 
 /**
  * \brief HASVK specific configuration options

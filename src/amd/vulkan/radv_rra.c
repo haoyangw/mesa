@@ -955,7 +955,7 @@ radv_rra_trace_init(struct radv_device *device)
       .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
       .buffer = device->rra_trace.ray_history_buffer,
    };
-   device->rra_trace.ray_history_addr = radv_GetBufferDeviceAddress(_device, &addr_info);
+   device->rra_trace.ray_history_addr = vk_common_GetBufferDeviceAddress(_device, &addr_info);
 
    struct radv_ray_history_header *ray_history_header = device->rra_trace.ray_history_data;
    memset(ray_history_header, 0, sizeof(struct radv_ray_history_header));
@@ -1182,7 +1182,7 @@ rra_map_accel_struct_data(struct rra_copy_context *ctx, uint32_t i)
 
    VkCopyBufferInfo2 copy_info = {
       .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer = accel_struct->buffer,
+      .srcBuffer = vk_buffer_to_handle(accel_struct->buffer),
       .dstBuffer = ctx->buffer,
       .regionCount = 1,
       .pRegions = &copy,

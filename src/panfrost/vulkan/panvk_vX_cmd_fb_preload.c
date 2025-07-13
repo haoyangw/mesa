@@ -253,7 +253,7 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             cmdbuf->state.gfx.render.color_attachments.iviews[i];
 
          if (iview)
-            textures[i] = iview->descs.tex;
+            textures[i] = iview->descs.tex[0];
          else
             textures[i] = (struct mali_texture_packed){0};
       }
@@ -267,8 +267,8 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             ?: cmdbuf->state.gfx.render.s_attachment.iview;
 
       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
-                           ? iview->descs.tex
-                           : iview->descs.other_aspect_tex;
+                           ? iview->descs.zs.tex
+                           : iview->descs.zs.other_aspect_tex;
    }
 
    if (key->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -277,8 +277,8 @@ fill_textures(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
             ?: cmdbuf->state.gfx.render.z_attachment.iview;
 
       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
-                           ? iview->descs.other_aspect_tex
-                           : iview->descs.tex;
+                           ? iview->descs.zs.other_aspect_tex
+                           : iview->descs.zs.tex;
    }
 }
 
@@ -492,7 +492,14 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
          fbinfo->zs.view.zs ? pan_image_view_get_zs_plane(fbinfo->zs.view.zs)
                             : pan_image_view_get_s_plane(fbinfo->zs.view.s);
       enum pipe_format fmt = plane->layout.format;
-      bool always = false;
+      /* On some GPUs (e.g. G31), we must use SHADER_MODE_ALWAYS rather than
+       * SHADER_MODE_INTERSECT for full screen operations. Since the full
+       * screen rectangle will always intersect, this won't affect
+       * performance.
+       */
+      bool always = !fbinfo->extent.minx && !fbinfo->extent.miny &&
+                    fbinfo->extent.maxx == (fbinfo->width - 1) &&
+                    fbinfo->extent.maxy == (fbinfo->height - 1);
 
       /* If we're dealing with a combined ZS resource and only one
        * component is cleared, we need to reload the whole surface
@@ -510,11 +517,21 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
        * Thing's haven't been benchmarked to determine what's
        * preferable (saving bandwidth vs having ZS preloaded
        * earlier), so let's leave it like that for now.
+       * HOWEVER, EARLY_ZS_ALWAYS doesn't exist on 7.0, only on
+       * 7.2 and later, so check for that!
        */
-      fbinfo->bifrost.pre_post.modes[dcd_idx] =
-         PAN_ARCH > 6
-            ? MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS
-         : always ? MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS
+      struct panvk_physical_device *pdev =
+         to_panvk_physical_device(dev->vk.physical);
+      unsigned gpu_id = pdev->kmod.props.gpu_prod_id;
+
+      /* the PAN_ARCH check is redundant but allows compiler optimization
+         when PAN_ARCH <= 6 */
+      if (PAN_ARCH > 6 && gpu_id >= 0x7200)
+         fbinfo->bifrost.pre_post.modes[dcd_idx] =
+            MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS;
+      else
+         fbinfo->bifrost.pre_post.modes[dcd_idx] = always
+                  ? MALI_PRE_POST_FRAME_SHADER_MODE_ALWAYS
                   : MALI_PRE_POST_FRAME_SHADER_MODE_INTERSECT;
    }
 
@@ -561,12 +578,26 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
 
    fill_textures(cmdbuf, fbinfo, key, descs.cpu + PANVK_DESCRIPTOR_SIZE);
 
+   uint32_t rt_written = 0;
+   if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
+      for (unsigned i = 0; i < fbinfo->rt_count; i++) {
+         if (fbinfo->rts[i].preload)
+            rt_written |= BITFIELD_BIT(i);
+      }
+   }
+
    if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT)
       fill_bds(fbinfo, key, bds.cpu);
 
-   struct panfrost_ptr res_table = panvk_cmd_alloc_desc(cmdbuf, RESOURCE);
+   /* Resource table sizes need to be multiples of 4. We use only one
+    * element here though.
+    */
+   const uint32_t res_table_size = MALI_RESOURCE_TABLE_SIZE_ALIGNMENT;
+   struct panfrost_ptr res_table =
+      panvk_cmd_alloc_desc_array(cmdbuf, res_table_size, RESOURCE);
    if (!res_table.cpu)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   memset(res_table.cpu, 0, pan_size(RESOURCE) * res_table_size);
 
    pan_cast_and_pack(res_table.cpu, RESOURCE, cfg) {
       cfg.address = descs.gpu;
@@ -619,32 +650,41 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
    pan_pack(&dcds[dcd_idx], DRAW, cfg) {
       if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
          /* Skipping ATEST requires forcing Z/S */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_EARLY;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_EARLY;
 
          cfg.blend = bds.gpu;
          cfg.blend_count = bd_count;
-         cfg.render_target_mask = cmdbuf->state.gfx.render.bound_attachments &
-                                  MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+         cfg.flags_1.render_target_mask =
+            cmdbuf->state.gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
       } else {
          /* ZS_EMIT requires late update/kill */
-         cfg.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
-         cfg.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.zs_update_operation = MALI_PIXEL_KILL_FORCE_LATE;
+         cfg.flags_0.pixel_kill_operation = MALI_PIXEL_KILL_FORCE_LATE;
          cfg.blend_count = 0;
       }
 
-      cfg.allow_forward_pixel_to_kill =
+      cfg.flags_0.allow_forward_pixel_to_kill =
          key->aspects == VK_IMAGE_ASPECT_COLOR_BIT;
-      cfg.allow_forward_pixel_to_be_killed = true;
+      cfg.flags_0.allow_forward_pixel_to_be_killed = true;
       cfg.depth_stencil = zsd.gpu;
-      cfg.sample_mask = 0xFFFF;
-      cfg.multisample_enable = key->samples > 1;
-      cfg.evaluate_per_sample = key->samples > 1;
+      cfg.flags_1.sample_mask = 0xFFFF;
+      cfg.flags_0.multisample_enable = key->samples > 1;
+      cfg.flags_0.evaluate_per_sample = key->samples > 1;
+      cfg.flags_0.clean_fragment_write = true;
+
+#if PAN_ARCH >= 12
+      cfg.fragment_resources = res_table.gpu | res_table_size;
+      cfg.fragment_shader = panvk_priv_mem_dev_addr(shader->spd);
+      cfg.thread_storage = cmdbuf->state.gfx.tsd;
+#else
       cfg.maximum_z = 1.0;
-      cfg.clean_fragment_write = true;
-      cfg.shader.resources = res_table.gpu | 1;
+      cfg.shader.resources = res_table.gpu | res_table_size;
       cfg.shader.shader = panvk_priv_mem_dev_addr(shader->spd);
       cfg.shader.thread_storage = cmdbuf->state.gfx.tsd;
+#endif
+      cfg.flags_2.write_mask = rt_written;
    }
 
    if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
@@ -658,9 +698,17 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
        * Thing's haven't been benchmarked to determine what's
        * preferable (saving bandwidth vs having ZS preloaded
        * earlier), so let's leave it like that for now.
+       *
+       * On v13+, we don't have EARLY_ZS_ALWAYS instead we use
+       * PREPASS_ALWAYS.
        */
+#if PAN_ARCH >= 13
+      fbinfo->bifrost.pre_post.modes[dcd_idx] =
+         MALI_PRE_POST_FRAME_SHADER_MODE_PREPASS_ALWAYS;
+#else
       fbinfo->bifrost.pre_post.modes[dcd_idx] =
          MALI_PRE_POST_FRAME_SHADER_MODE_EARLY_ZS_ALWAYS;
+#endif
    }
 
    return VK_SUCCESS;

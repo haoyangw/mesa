@@ -6,13 +6,11 @@
 #include "brw_eu.h"
 #include "intel_nir.h"
 #include "brw_nir.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_generator.h"
 #include "brw_private.h"
 #include "dev/intel_debug.h"
-
-using namespace brw;
 
 /**
  * Return the number of patches to accumulate before a MULTI_PATCH mode thread is
@@ -44,12 +42,12 @@ get_patch_count_threshold(int input_control_points)
 }
 
 static void
-brw_set_tcs_invocation_id(fs_visitor &s)
+brw_set_tcs_invocation_id(brw_shader &s)
 {
    const struct intel_device_info *devinfo = s.devinfo;
    struct brw_tcs_prog_data *tcs_prog_data = brw_tcs_prog_data(s.prog_data);
    struct brw_vue_prog_data *vue_prog_data = &tcs_prog_data->base;
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
 
    const unsigned instance_id_mask =
       (devinfo->verx10 >= 125) ? INTEL_MASK(7, 0) :
@@ -90,7 +88,7 @@ brw_set_tcs_invocation_id(fs_visitor &s)
 }
 
 static void
-brw_emit_tcs_thread_end(fs_visitor &s)
+brw_emit_tcs_thread_end(brw_shader &s)
 {
    /* Try and tag the last URB write with EOT instead of emitting a whole
     * separate write just to finish the thread.  There isn't guaranteed to
@@ -99,7 +97,7 @@ brw_emit_tcs_thread_end(fs_visitor &s)
    if (s.mark_last_urb_write_with_eot())
       return;
 
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
 
    /* Emit a URB write to end the thread.  On Broadwell, we use this to write
     * zero to the "TR DS Cache Disable" bit (we haven't implemented a fancy
@@ -111,34 +109,34 @@ brw_emit_tcs_thread_end(fs_visitor &s)
    srcs[URB_LOGICAL_SRC_CHANNEL_MASK] = brw_imm_ud(WRITEMASK_X << 16);
    srcs[URB_LOGICAL_SRC_DATA] = brw_imm_ud(0);
    srcs[URB_LOGICAL_SRC_COMPONENTS] = brw_imm_ud(1);
-   fs_inst *inst = bld.emit(SHADER_OPCODE_URB_WRITE_LOGICAL,
+   brw_inst *inst = bld.emit(SHADER_OPCODE_URB_WRITE_LOGICAL,
                             reg_undef, srcs, ARRAY_SIZE(srcs));
    inst->eot = true;
 }
 
 static void
-brw_assign_tcs_urb_setup(fs_visitor &s)
+brw_assign_tcs_urb_setup(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_TESS_CTRL);
 
    /* Rewrite all ATTR file references to HW_REGs. */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       s.convert_attr_sources_to_hw_regs(inst);
    }
 }
 
 static bool
-run_tcs(fs_visitor &s)
+run_tcs(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_TESS_CTRL);
 
    struct brw_vue_prog_data *vue_prog_data = brw_vue_prog_data(s.prog_data);
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
 
    assert(vue_prog_data->dispatch_mode == INTEL_DISPATCH_MODE_TCS_SINGLE_PATCH ||
           vue_prog_data->dispatch_mode == INTEL_DISPATCH_MODE_TCS_MULTI_PATCH);
 
-   s.payload_ = new tcs_thread_payload(s);
+   s.payload_ = new brw_tcs_thread_payload(s);
 
    /* Initialize gl_InvocationID */
    brw_set_tcs_invocation_id(s);
@@ -154,7 +152,7 @@ run_tcs(fs_visitor &s)
       bld.IF(BRW_PREDICATE_NORMAL);
    }
 
-   nir_to_brw(&s);
+   brw_from_nir(&s);
 
    if (fix_dispatch_mask) {
       bld.emit(BRW_OPCODE_ENDIF);
@@ -195,9 +193,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
 
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_TCS);
 
-   vue_prog_data->base.stage = MESA_SHADER_TESS_CTRL;
-   prog_data->base.base.ray_queries = nir->info.ray_queries;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    nir->info.outputs_written = key->outputs_written;
    nir->info.patch_outputs_written = key->patch_outputs_written;
@@ -275,9 +271,9 @@ brw_compile_tcs(const struct brw_compiler *compiler,
       brw_print_vue_map(stderr, &vue_prog_data->vue_map, MESA_SHADER_TESS_CTRL);
    }
 
-   fs_visitor v(compiler, &params->base, &key->base,
-                &prog_data->base.base, nir, dispatch_width,
-                params->base.stats != NULL, debug_enabled);
+    brw_shader v(compiler, &params->base, &key->base,
+                 &prog_data->base.base, nir, dispatch_width,
+                 params->base.stats != NULL, debug_enabled);
    if (!run_tcs(v)) {
       params->base.error_str =
          ralloc_strdup(params->base.mem_ctx, v.fail_msg);

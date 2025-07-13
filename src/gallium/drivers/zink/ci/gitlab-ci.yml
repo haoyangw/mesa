@@ -7,7 +7,8 @@ zink-lvp:
     - .deqp-test
     - .zink-lvp-test
   tags:
-    - kvm  # FIXME: this is a hack, should not be needed
+    # FIXME: kvm is a hack, should not be needed
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
   variables:
     DEQP_SUITE: zink-lvp
     DEQP_FRACTION: 8
@@ -26,9 +27,10 @@ zink-venus-lvp:
     - .test-gl
     - .deqp-test
     - .zink-venus-lvp-test
-  timeout: 15min  # base run time = 5min, but it's on the shared runners so it can go up
+  timeout: 15min  # base run time = 8min, but it's on the shared runners so it can go up
   variables:
     DEQP_SUITE: zink-venus-lvp
+    DEQP_FRACTION: 2
     PIGLIT_NO_WINDOW: 1
     # Enable validation (except for on piglit, see deqp-zink-venus-lvp.toml), logging
     # to stdout and aborting on unknown failures.
@@ -41,6 +43,14 @@ zink-venus-lvp:
     export LIBGL_DRIVERS_PATH="$CI_PROJECT_DIR/install/lib/dri"
     xvfb-run --server-args='-noreset' bash -c "./install/crosvm-runner.sh ./install/deqp-runner.sh"
 
+zink-venus-lvp-full:
+  extends:
+    - zink-venus-lvp
+    - .zink-venus-lvp-manual-rules
+  timeout: 30m
+  variables:
+    DEQP_FRACTION: 1
+
 zink-anv-adl:
   extends:
     - .zink-anv-adl-test
@@ -50,8 +60,9 @@ zink-anv-adl:
     HWCI_START_WESTON: 1
     # We use gbm because its a copy of tgl job
     PIGLIT_PLATFORM: gbm
+    FDO_CI_CONCURRENT: 6 # higher is too much, and leads to OOM
   timeout: 30m
-  parallel: 2
+  parallel: 4
 
 # Manual full run when you want to double-check the full status.
 zink-anv-adl-full:
@@ -60,8 +71,23 @@ zink-anv-adl-full:
     - .zink-anv-manual-rules
   variables:
     DEQP_SUITE: zink-anv-adl-full
-    HWCI_START_WESTON: 1
   timeout: 2h
+  parallel: 5
+
+zink-anv-adl-traces:
+  extends:
+    - .zink-anv-adl-trace-test
+  variables:
+    PIGLIT_TRACES_FILE: traces-zink.yml
+
+zink-anv-adl-traces-restricted:
+  extends:
+    - .zink-anv-adl-trace-test
+    - .zink-anv-rules-restricted
+  variables:
+    PIGLIT_TRACES_FILE: traces-zink-restricted.yml
+    PIGLIT_REPLAY_EXTRA_ARGS: --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_bucket=${S3_TRACIE_PRIVATE_BUCKET} --jwt-file=${S3_JWT_FILE}
+  allow_failure: true
 
 zink-anv-tgl:
   extends:
@@ -75,6 +101,7 @@ zink-anv-tgl:
     # MESA: error: ZINK: vkQueueSubmit failed (VK_ERROR_DEVICE_LOST)
     # Xorg: ../src/gallium/drivers/zink/zink_batch.c:599: zink_end_batch: Assertion `!ctx->batch_states' failed.
     PIGLIT_PLATFORM: gbm
+    FDO_CI_CONCURRENT: 6 # higher is too much, and leads to OOM
   parallel: 4
 
 # Manual full run when you want to double-check the full status.
@@ -84,7 +111,6 @@ zink-anv-tgl-full:
     - .zink-anv-manual-rules
   variables:
     DEQP_SUITE: zink-anv-tgl-full
-    HWCI_START_WESTON: 1
   timeout: 1h 45m
   parallel: 3
 
@@ -96,7 +122,7 @@ zink-anv-tgl-traces:
 
 zink-anv-tgl-traces-restricted:
   extends:
-    - zink-anv-tgl-traces
+    - .zink-anv-tgl-trace-test
     - .zink-anv-rules-restricted
   variables:
     PIGLIT_TRACES_FILE: traces-zink-restricted.yml
@@ -111,10 +137,10 @@ zink-tu-a618:
     - .lava-sc7180-trogdor-lazor-limozeen:arm64
   variables:
     DEQP_FRACTION: 2
-    DEQP_SUITE: zink-freedreno-a618
+    DEQP_SUITE: zink-tu-a618
     FLAKES_CHANNEL: "#freedreno-ci"
     HWCI_START_WESTON: 1
-    GPU_VERSION: zink-freedreno-a618
+    GPU_VERSION: zink-tu-a618
   parallel: 2
 
 zink-tu-a618-full:
@@ -131,7 +157,6 @@ zink-tu-a618-traces:
     - a618-traces
     - .zink-turnip-collabora-rules
     - .zink-trace-test
-  parallel: null
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "zink-a618"
 
@@ -158,7 +183,7 @@ zink-tu-a750:
     - .zink-turnip-valve-manual-rules
   timeout: 25m  # base runtime 11min total, 9min of testing
   variables:
-    B2C_TIMEOUT_BOOT_MINUTES: 15
+    B2C_TIMEOUT_BOOT_MINUTES: 18
     B2C_TIMEOUT_OVERALL_MINUTES: 20
     DEQP_SUITE: zink-tu-a750
     GPU_VERSION: zink-tu-a750

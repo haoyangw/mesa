@@ -4,9 +4,9 @@
  */
 
 #include "brw_eu.h"
-#include "brw_fs.h"
+#include "brw_shader.h"
+#include "brw_analysis.h"
 #include "brw_builder.h"
-#include "brw_fs_live_variables.h"
 #include "brw_generator.h"
 #include "brw_nir.h"
 #include "brw_cfg.h"
@@ -18,27 +18,24 @@
 
 #include <memory>
 
-using namespace brw;
-
-static fs_inst *
-brw_emit_single_fb_write(fs_visitor &s, const brw_builder &bld,
+static brw_inst *
+brw_emit_single_fb_write(brw_shader &s, const brw_builder &bld,
                          brw_reg color0, brw_reg color1,
-                         brw_reg src0_alpha, unsigned components,
+                         brw_reg src0_alpha,
+                         unsigned target, unsigned components,
                          bool null_rt)
 {
    assert(s.stage == MESA_SHADER_FRAGMENT);
    struct brw_wm_prog_data *prog_data = brw_wm_prog_data(s.prog_data);
 
-   /* Hand over gl_FragDepth or the payload depth. */
-   const brw_reg dst_depth = brw_fetch_payload_reg(bld, s.fs_payload().dest_depth_reg);
-
    brw_reg sources[FB_WRITE_LOGICAL_NUM_SRCS];
    sources[FB_WRITE_LOGICAL_SRC_COLOR0]     = color0;
    sources[FB_WRITE_LOGICAL_SRC_COLOR1]     = color1;
    sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] = src0_alpha;
-   sources[FB_WRITE_LOGICAL_SRC_DST_DEPTH]  = dst_depth;
+   sources[FB_WRITE_LOGICAL_SRC_TARGET]     = brw_imm_ud(target);
    sources[FB_WRITE_LOGICAL_SRC_COMPONENTS] = brw_imm_ud(components);
    sources[FB_WRITE_LOGICAL_SRC_NULL_RT]    = brw_imm_ud(null_rt);
+   sources[FB_WRITE_LOGICAL_SRC_LAST_RT]    = brw_imm_ud(false);
 
    if (prog_data->uses_omask)
       sources[FB_WRITE_LOGICAL_SRC_OMASK] = s.sample_mask;
@@ -47,7 +44,7 @@ brw_emit_single_fb_write(fs_visitor &s, const brw_builder &bld,
    if (s.nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
       sources[FB_WRITE_LOGICAL_SRC_SRC_STENCIL] = s.frag_stencil;
 
-   fs_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
+   brw_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
                              sources, ARRAY_SIZE(sources));
 
    if (prog_data->uses_kill) {
@@ -59,10 +56,10 @@ brw_emit_single_fb_write(fs_visitor &s, const brw_builder &bld,
 }
 
 static void
-brw_do_emit_fb_writes(fs_visitor &s, int nr_color_regions, bool replicate_alpha)
+brw_do_emit_fb_writes(brw_shader &s, int nr_color_regions, bool replicate_alpha)
 {
-   const brw_builder bld = brw_builder(&s).at_end();
-   fs_inst *inst = NULL;
+   const brw_builder bld = brw_builder(&s);
+   brw_inst *inst = NULL;
 
    for (int target = 0; target < nr_color_regions; target++) {
       /* Skip over outputs that weren't written. */
@@ -77,9 +74,8 @@ brw_do_emit_fb_writes(fs_visitor &s, int nr_color_regions, bool replicate_alpha)
          src0_alpha = offset(s.outputs[0], bld, 3);
 
       inst = brw_emit_single_fb_write(s, abld, s.outputs[target],
-                                      s.dual_src_output, src0_alpha, 4,
+                                      s.dual_src_output, src0_alpha, target, 4,
                                       false);
-      inst->target = target;
    }
 
    if (inst == NULL) {
@@ -106,17 +102,16 @@ brw_do_emit_fb_writes(fs_visitor &s, int nr_color_regions, bool replicate_alpha)
       const brw_reg tmp = bld.vgrf(BRW_TYPE_UD, 4);
       bld.LOAD_PAYLOAD(tmp, srcs, 4, 0);
 
-      inst = brw_emit_single_fb_write(s, bld, tmp, reg_undef, reg_undef, 4,
-                                      use_null_rt);
-      inst->target = 0;
+      inst = brw_emit_single_fb_write(s, bld, tmp, reg_undef, reg_undef,
+                                      0, 4, use_null_rt);
    }
 
-   inst->last_rt = true;
+   inst->src[FB_WRITE_LOGICAL_SRC_LAST_RT] = brw_imm_ud(true);
    inst->eot = true;
 }
 
 static void
-brw_emit_fb_writes(fs_visitor &s)
+brw_emit_fb_writes(brw_shader &s)
 {
    const struct intel_device_info *devinfo = s.devinfo;
    assert(s.stage == MESA_SHADER_FRAGMENT);
@@ -181,10 +176,10 @@ brw_emit_fb_writes(fs_visitor &s)
 
 /** Emits the interpolation for the varying inputs. */
 static void
-brw_emit_interpolation_setup(fs_visitor &s)
+brw_emit_interpolation_setup(brw_shader &s)
 {
    const struct intel_device_info *devinfo = s.devinfo;
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    brw_builder abld = bld.annotate("compute pixel centers");
 
    s.pixel_x = bld.vgrf(BRW_TYPE_F);
@@ -192,7 +187,7 @@ brw_emit_interpolation_setup(fs_visitor &s)
 
    const struct brw_wm_prog_key *wm_key = (brw_wm_prog_key*) s.key;
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(s.prog_data);
-   fs_thread_payload &payload = s.fs_payload();
+   brw_fs_thread_payload &payload = s.fs_payload();
 
    brw_reg int_sample_offset_x, int_sample_offset_y; /* Used on Gen12HP+ */
    brw_reg int_sample_offset_xy; /* Used on Gen8+ */
@@ -378,9 +373,9 @@ brw_emit_interpolation_setup(fs_visitor &s)
                   int_pixel_offset_y);
 
          if (wm_prog_data->coarse_pixel_dispatch != INTEL_NEVER) {
-            fs_inst *addx = dbld.ADD(int_pixel_x, int_pixel_x,
+            brw_inst *addx = dbld.ADD(int_pixel_x, int_pixel_x,
                                      horiz_stride(half_int_pixel_offset_x, 0));
-            fs_inst *addy = dbld.ADD(int_pixel_y, int_pixel_y,
+            brw_inst *addy = dbld.ADD(int_pixel_y, int_pixel_y,
                                      horiz_stride(half_int_pixel_offset_y, 0));
             if (wm_prog_data->coarse_pixel_dispatch != INTEL_ALWAYS) {
                addx->predicate = BRW_PREDICATE_NORMAL;
@@ -509,8 +504,6 @@ brw_emit_interpolation_setup(fs_visitor &s)
    }
 
    if (wm_key->persample_interp == INTEL_SOMETIMES) {
-      assert(!devinfo->needs_unlit_centroid_workaround);
-
       const brw_builder ubld = bld.exec_all().group(16, 0);
       bool loaded_flag = false;
 
@@ -561,42 +554,6 @@ brw_emit_interpolation_setup(fs_visitor &s)
       s.delta_xy[i] = brw_fetch_barycentric_reg(
          bld, payload.barycentric_coord_reg[i]);
    }
-
-   uint32_t centroid_modes = wm_prog_data->barycentric_interp_modes &
-      (1 << INTEL_BARYCENTRIC_PERSPECTIVE_CENTROID |
-       1 << INTEL_BARYCENTRIC_NONPERSPECTIVE_CENTROID);
-
-   if (devinfo->needs_unlit_centroid_workaround && centroid_modes) {
-      /* Get the pixel/sample mask into f0 so that we know which
-       * pixels are lit.  Then, for each channel that is unlit,
-       * replace the centroid data with non-centroid data.
-       */
-      for (unsigned i = 0; i < DIV_ROUND_UP(s.dispatch_width, 16); i++) {
-         bld.exec_all().group(1, 0)
-            .MOV(retype(brw_flag_reg(0, i), BRW_TYPE_UW),
-                 retype(brw_vec1_grf(1 + i, 7), BRW_TYPE_UW));
-      }
-
-      for (int i = 0; i < INTEL_BARYCENTRIC_MODE_COUNT; ++i) {
-         if (!(centroid_modes & (1 << i)))
-            continue;
-
-         const brw_reg centroid_delta_xy = s.delta_xy[i];
-         const brw_reg &pixel_delta_xy = s.delta_xy[i - 1];
-
-         s.delta_xy[i] = bld.vgrf(BRW_TYPE_F, 2);
-
-         for (unsigned c = 0; c < 2; c++) {
-            for (unsigned q = 0; q < s.dispatch_width / 8; q++) {
-               set_predicate(BRW_PREDICATE_NORMAL,
-                  bld.quarter(q).SEL(
-                     quarter(offset(s.delta_xy[i], bld, c), q),
-                     quarter(offset(centroid_delta_xy, bld, c), q),
-                     quarter(offset(pixel_delta_xy, bld, c), q)));
-            }
-         }
-      }
-   }
 }
 
 
@@ -605,10 +562,10 @@ brw_emit_interpolation_setup(fs_visitor &s)
  * instructions to FS_OPCODE_REP_FB_WRITE.
  */
 static void
-brw_emit_repclear_shader(fs_visitor &s)
+brw_emit_repclear_shader(brw_shader &s)
 {
    brw_wm_prog_key *key = (brw_wm_prog_key*) s.key;
-   fs_inst *write = NULL;
+   brw_inst *write = NULL;
 
    assert(s.devinfo->ver < 20);
    assert(s.uniforms == 0);
@@ -623,7 +580,7 @@ brw_emit_repclear_shader(fs_visitor &s)
               BRW_VERTICAL_STRIDE_8, BRW_WIDTH_2, BRW_HORIZONTAL_STRIDE_4,
               BRW_SWIZZLE_XYZW, WRITEMASK_XYZW);
 
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    bld.exec_all().group(4, 0).MOV(color_output, color_input);
 
    if (key->nr_color_regions > 1) {
@@ -634,7 +591,7 @@ brw_emit_repclear_shader(fs_visitor &s)
 
    for (int i = 0; i < key->nr_color_regions; ++i) {
       if (i > 0)
-         bld.exec_all().group(1, 0).MOV(component(header, 2), brw_imm_ud(i));
+         bld.uniform().MOV(component(header, 2), brw_imm_ud(i));
 
       write = bld.emit(SHADER_OPCODE_SEND);
       write->resize_sources(3);
@@ -643,7 +600,7 @@ brw_emit_repclear_shader(fs_visitor &s)
       write->header_size = i == 0 ? 0 : 2;
       write->mlen = 1 + write->header_size;
 
-      write->sfid = GFX6_SFID_DATAPORT_RENDER_CACHE;
+      write->sfid = BRW_SFID_RENDER_CACHE;
       write->src[0] = brw_imm_ud(
          brw_fb_write_desc(
             s.devinfo, i,
@@ -661,24 +618,12 @@ brw_emit_repclear_shader(fs_visitor &s)
       write->mlen = 1 + write->header_size;
    }
    write->eot = true;
-   write->last_rt = true;
 
    brw_calculate_cfg(s);
 
    s.first_non_payload_grf = s.payload().num_regs;
 
    brw_lower_scoreboard(s);
-}
-
-/**
- * Turn one of the two CENTROID barycentric modes into PIXEL mode.
- */
-static enum intel_barycentric_mode
-centroid_to_pixel(enum intel_barycentric_mode bary)
-{
-   assert(bary == INTEL_BARYCENTRIC_PERSPECTIVE_CENTROID ||
-          bary == INTEL_BARYCENTRIC_NONPERSPECTIVE_CENTROID);
-   return (enum intel_barycentric_mode) ((unsigned) bary - 1);
 }
 
 static void
@@ -982,15 +927,10 @@ brw_compute_barycentric_interp_modes(const struct intel_device_info *devinfo,
             if (!is_used_in_not_interp_frag_coord(&intrin->def))
                continue;
 
-            nir_intrinsic_op bary_op = intrin->intrinsic;
             enum intel_barycentric_mode bary =
                brw_barycentric_mode(key, intrin);
 
             barycentric_interp_modes |= 1 << bary;
-
-            if (devinfo->needs_unlit_centroid_workaround &&
-                bary_op == nir_intrinsic_load_barycentric_centroid)
-               barycentric_interp_modes |= 1 << centroid_to_pixel(bary);
          }
       }
    }
@@ -1227,7 +1167,7 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
     * us to lose out on the eliminate_find_live_channel() optimization.
     */
    prog_data->uses_vmask = devinfo->verx10 < 125 ||
-                           shader->info.fs.needs_quad_helper_invocations ||
+                           shader->info.fs.needs_coarse_quad_helper_invocations ||
                            shader->info.uses_wide_subgroup_intrinsics ||
                            prog_data->coarse_pixel_dispatch != INTEL_NEVER;
 
@@ -1272,7 +1212,7 @@ gfx9_ps_header_only_workaround(struct brw_wm_prog_data *wm_prog_data)
 }
 
 static void
-brw_assign_urb_setup(fs_visitor &s)
+brw_assign_urb_setup(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_FRAGMENT);
 
@@ -1284,7 +1224,7 @@ brw_assign_urb_setup(fs_visitor &s)
    /* Offset all the urb_setup[] index by the actual position of the
     * setup regs, now that the location of the constants has been chosen.
     */
-   foreach_block_and_inst(block, fs_inst, inst, s.cfg) {
+   foreach_block_and_inst(block, brw_inst, inst, s.cfg) {
       for (int i = 0; i < inst->sources; i++) {
          if (inst->src[i].file == ATTR) {
             /* ATTR brw_reg::nr in the FS is in units of logical scalar
@@ -1455,17 +1395,17 @@ brw_assign_urb_setup(fs_visitor &s)
 }
 
 static bool
-run_fs(fs_visitor &s, bool allow_spilling, bool do_rep_send)
+run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
 {
    const struct intel_device_info *devinfo = s.devinfo;
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(s.prog_data);
    brw_wm_prog_key *wm_key = (brw_wm_prog_key *) s.key;
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    const nir_shader *nir = s.nir;
 
    assert(s.stage == MESA_SHADER_FRAGMENT);
 
-   s.payload_ = new fs_thread_payload(s, s.source_depth_to_render_target);
+   s.payload_ = new brw_fs_thread_payload(s, s.source_depth_to_render_target);
 
    if (nir->info.ray_queries > 0)
       s.limit_dispatch_width(16, "SIMD32 not supported with ray queries.\n");
@@ -1494,16 +1434,15 @@ run_fs(fs_visitor &s, bool allow_spilling, bool do_rep_send)
             const brw_reg dispatch_mask =
                devinfo->ver >= 20 ? xe2_vec1_grf(i, 15) :
                                     brw_vec1_grf(i + 1, 7);
-            bld.exec_all().group(1, 0)
-               .MOV(brw_sample_mask_reg(bld.group(lower_width, i)),
-                    retype(dispatch_mask, BRW_TYPE_UW));
+            bld.uniform().MOV(brw_sample_mask_reg(bld.group(lower_width, i)),
+                              retype(dispatch_mask, BRW_TYPE_UW));
          }
       }
 
       if (nir->info.writes_memory)
          wm_prog_data->has_side_effects = true;
 
-      nir_to_brw(&s);
+      brw_from_nir(&s);
 
       if (s.failed)
 	 return false;
@@ -1546,9 +1485,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_WM);
 
-   prog_data->base.stage = MESA_SHADER_FRAGMENT;
-   prog_data->base.ray_queries = nir->info.ray_queries;
-   prog_data->base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base, &params->base);
 
    const struct intel_device_info *devinfo = compiler->devinfo;
    const unsigned max_subgroup_size = 32;
@@ -1585,14 +1522,14 @@ brw_compile_fs(const struct brw_compiler *compiler,
    assert(reqd_dispatch_width == SUBGROUP_SIZE_VARYING ||
           reqd_dispatch_width == SUBGROUP_SIZE_REQUIRE_16);
 
-   std::unique_ptr<fs_visitor> v8, v16, v32, vmulti;
+   std::unique_ptr<brw_shader> v8, v16, v32, vmulti;
    cfg_t *simd8_cfg = NULL, *simd16_cfg = NULL, *simd32_cfg = NULL,
       *multi_cfg = NULL;
    float throughput = 0;
    bool has_spilled = false;
 
    if (devinfo->ver < 20) {
-      v8 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+      v8 = std::make_unique<brw_shader>(compiler, &params->base, key,
                                         prog_data, nir, 8, 1,
                                         params->base.stats != NULL,
                                         debug_enabled);
@@ -1608,7 +1545,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
          prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
                                          v8->grf_used);
 
-         const performance &perf = v8->performance_analysis.require();
+         const brw_performance &perf = v8->performance_analysis.require();
          throughput = MAX2(throughput, perf.throughput);
          has_spilled = v8->spilled_any_registers;
          allow_spilling = false;
@@ -1626,14 +1563,14 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    if (devinfo->ver >= 30) {
       unsigned max_dispatch_width = reqd_dispatch_width ? reqd_dispatch_width : 32;
-      fs_visitor *vbase = NULL;
+      brw_shader *vbase = NULL;
 
       if (params->max_polygons >= 2 && !key->coarse_pixel) {
          if (params->max_polygons >= 4 && max_dispatch_width >= 32 &&
              4 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 4X8)) {
             /* Try a quad-SIMD8 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 32, 4,
                                                   params->base.stats != NULL,
                                                   debug_enabled);
@@ -1654,7 +1591,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
              2 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 2X16)) {
             /* Try a dual-SIMD16 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 32, 2,
                                                   params->base.stats != NULL,
                                                   debug_enabled);
@@ -1675,7 +1612,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
              2 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 2X8)) {
             /* Try a dual-SIMD8 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 16, 2,
                                                   params->base.stats != NULL,
                                                   debug_enabled);
@@ -1697,7 +1634,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
           INTEL_SIMD(FS, 32) &&
           !prog_data->base.ray_queries) {
          /* Try a SIMD32 compile */
-         v32 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+         v32 = std::make_unique<brw_shader>(compiler, &params->base, key,
                                             prog_data, nir, 32, 1,
                                             params->base.stats != NULL,
                                             debug_enabled);
@@ -1722,7 +1659,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
       if (!vbase && INTEL_SIMD(FS, 16)) {
          /* Try a SIMD16 compile */
-         v16 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+         v16 = std::make_unique<brw_shader>(compiler, &params->base, key,
                                             prog_data, nir, 16, 1,
                                             params->base.stats != NULL,
                                             debug_enabled);
@@ -1746,7 +1683,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
            INTEL_SIMD(FS, 16)) ||
           reqd_dispatch_width == SUBGROUP_SIZE_REQUIRE_16) {
          /* Try a SIMD16 compile */
-         v16 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+         v16 = std::make_unique<brw_shader>(compiler, &params->base, key,
                                             prog_data, nir, 16, 1,
                                             params->base.stats != NULL,
                                             debug_enabled);
@@ -1764,7 +1701,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             prog_data->base.grf_used = MAX2(prog_data->base.grf_used,
                                             v16->grf_used);
 
-            const performance &perf = v16->performance_analysis.require();
+            const brw_performance &perf = v16->performance_analysis.require();
             throughput = MAX2(throughput, perf.throughput);
             has_spilled = v16->spilled_any_registers;
             allow_spilling = false;
@@ -1780,7 +1717,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
           reqd_dispatch_width == SUBGROUP_SIZE_VARYING &&
           !simd16_failed && INTEL_SIMD(FS, 32)) {
          /* Try a SIMD32 compile */
-         v32 = std::make_unique<fs_visitor>(compiler, &params->base, key,
+         v32 = std::make_unique<brw_shader>(compiler, &params->base, key,
                                             prog_data, nir, 32, 1,
                                             params->base.stats != NULL,
                                             debug_enabled);
@@ -1794,7 +1731,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
                                 "SIMD32 shader failed to compile: %s\n",
                                 v32->fail_msg);
          } else {
-            const performance &perf = v32->performance_analysis.require();
+            const brw_performance &perf = v32->performance_analysis.require();
 
             if (!INTEL_DEBUG(DEBUG_DO32) && throughput >= perf.throughput) {
                brw_shader_perf_log(compiler, params->base.log_data,
@@ -1815,7 +1752,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
       if (devinfo->ver >= 12 && !has_spilled &&
           params->max_polygons >= 2 && !key->coarse_pixel &&
           reqd_dispatch_width == SUBGROUP_SIZE_VARYING) {
-         fs_visitor *vbase = v8 ? v8.get() : v16 ? v16.get() : v32.get();
+         brw_shader *vbase = v8 ? v8.get() : v16 ? v16.get() : v32.get();
          assert(vbase);
 
          if (devinfo->ver >= 20 &&
@@ -1824,7 +1761,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
              4 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 4X8)) {
             /* Try a quad-SIMD8 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 32, 4,
                                                   params->base.stats != NULL,
                                                   debug_enabled);
@@ -1844,7 +1781,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
              2 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 2X16)) {
             /* Try a dual-SIMD16 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 32, 2,
                                                   params->base.stats != NULL,
                                                   debug_enabled);
@@ -1863,7 +1800,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
              2 * prog_data->num_varying_inputs <= MAX_VARYING &&
              INTEL_SIMD(FS, 2X8)) {
             /* Try a dual-SIMD8 compile */
-            vmulti = std::make_unique<fs_visitor>(compiler, &params->base, key,
+            vmulti = std::make_unique<brw_shader>(compiler, &params->base, key,
                                                   prog_data, nir, 16, 2,
                                                   params->base.stats != NULL,
                                                   debug_enabled);

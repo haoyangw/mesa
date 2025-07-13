@@ -53,8 +53,7 @@ agx_nir_lower_poly_stipple(nir_shader *s)
    nir_demote_if(b, nir_ieq_imm(b, bit, 0));
    s->info.fs.uses_discard = true;
 
-   nir_metadata_preserve(b->impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
 static bool
@@ -393,7 +392,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    bool force_translucent = false;
    nir_lower_blend_options opts = {
       .scalar_blend_const = true,
-      .logicop_enable = key->blend.logicop_func != PIPE_LOGICOP_COPY,
+      .logicop_enable = key->blend.logicop_enable,
       .logicop_func = key->blend.logicop_func,
    };
 
@@ -685,8 +684,7 @@ agx_nir_lower_stats_fs(nir_shader *s)
    nir_global_atomic(b, 32, addr, samples, .atomic_op = nir_atomic_op_iadd);
 
    nir_pop_if(b, NULL);
-   nir_metadata_preserve(b->impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, b->impl, nir_metadata_control_flow);
 }
 
 void

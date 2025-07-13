@@ -234,7 +234,6 @@ struct radeon_info {
    bool has_bo_metadata;
    bool has_eqaa_surface_allocator;
    bool has_sparse_vm_mappings;
-   bool has_scheduled_fence_dependency;
    bool has_gang_submit;
    bool has_gpuvm_fault_query;
    bool has_pcie_bandwidth_info;
@@ -329,8 +328,14 @@ struct radeon_info {
    bool has_image_bvh_intersect_ray;
 };
 
-bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
-                       bool require_pci_bus_info);
+enum ac_query_gpu_info_result {
+   AC_QUERY_GPU_INFO_SUCCESS,
+   AC_QUERY_GPU_INFO_FAIL,
+   AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW,
+};
+
+enum ac_query_gpu_info_result ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
+                                                bool require_pci_bus_info);
 
 void ac_compute_driver_uuid(char *uuid, size_t size);
 
@@ -383,12 +388,8 @@ struct ac_task_info {
    uint32_t payload_ring_offset;
    uint32_t bo_size_bytes;
    uint16_t num_entries;
+   uint32_t payload_entry_size;
 };
-
-/* Size of each payload entry in the task payload ring.
- * Spec requires minimum 16K bytes.
- */
-#define AC_TASK_PAYLOAD_ENTRY_BYTES 16384
 
 /* Size of each draw entry in the task draw ring.
  * 4 DWORDs per entry.

@@ -31,6 +31,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "nir/nir_serialize.h"
 
+#include "util/shader_stats.h"
 #include "util/u_atomic.h"
 #include "util/os_time.h"
 #include "util/perf/cpu_trace.h"
@@ -1074,6 +1075,7 @@ enable_line_smooth(struct v3dv_pipeline *pipeline,
    if (!pipeline->rasterization_enabled)
       return false;
 
+   assert(rs_info);
    const VkPipelineRasterizationLineStateCreateInfoKHR *ls_info =
       vk_find_struct_const(rs_info->pNext,
                            PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR);
@@ -1081,11 +1083,20 @@ enable_line_smooth(struct v3dv_pipeline *pipeline,
    if (!ls_info)
       return false;
 
-   /* Although topology is dynamic now, the topology class can't change
-    * because we don't support dynamicPrimitiveTopologyUnrestricted, so we can
-    * use the static topology from the pipeline for this.
-    */
-   switch(pipeline->topology) {
+   enum mesa_prim output_topology;
+   if (pipeline->has_gs) {
+      struct v3dv_pipeline_stage *p_stage_gs = pipeline->stages[BROADCOM_SHADER_GEOMETRY];
+      assert(p_stage_gs);
+      output_topology = p_stage_gs->nir->info.gs.output_primitive;
+   } else {
+      /* Although topology is dynamic now, the topology class can't change
+       * because we don't support dynamicPrimitiveTopologyUnrestricted, so we
+       * can use the static topology from the pipeline for this.
+       */
+      output_topology = pipeline->topology;
+   }
+
+   switch(output_topology) {
    case MESA_PRIM_LINES:
    case MESA_PRIM_LINE_LOOP:
    case MESA_PRIM_LINE_STRIP:
@@ -3364,15 +3375,6 @@ pipeline_get_qpu(struct v3dv_pipeline *pipeline,
    return variant->qpu_insts;
 }
 
-/* FIXME: we use the same macro in various drivers, maybe move it to
- * the common vk_util.h?
- */
-#define WRITE_STR(field, ...) ({                                \
-   memset(field, 0, sizeof(field));                             \
-   UNUSED int _i = snprintf(field, sizeof(field), __VA_ARGS__); \
-   assert(_i > 0 && _i < sizeof(field));                        \
-})
-
 static bool
 write_ir_text(VkPipelineExecutableInternalRepresentationKHR* ir,
               const char *data)
@@ -3487,8 +3489,8 @@ v3dv_GetPipelineExecutableInternalRepresentationsKHR(
    if (exe->nir_str) {
       vk_outarray_append_typed(VkPipelineExecutableInternalRepresentationKHR,
                                &out, ir) {
-         WRITE_STR(ir->name, "NIR (%s)", broadcom_shader_stage_name(exe->stage));
-         WRITE_STR(ir->description, "Final NIR form");
+         VK_PRINT_STR(ir->name, "NIR (%s)", broadcom_shader_stage_name(exe->stage));
+         VK_COPY_STR(ir->description, "Final NIR form");
          if (!write_ir_text(ir, exe->nir_str))
             incomplete = true;
       }
@@ -3497,8 +3499,8 @@ v3dv_GetPipelineExecutableInternalRepresentationsKHR(
    if (exe->qpu_str) {
       vk_outarray_append_typed(VkPipelineExecutableInternalRepresentationKHR,
                                &out, ir) {
-         WRITE_STR(ir->name, "QPU (%s)", broadcom_shader_stage_name(exe->stage));
-         WRITE_STR(ir->description, "Final QPU assembly");
+         VK_PRINT_STR(ir->name, "QPU (%s)", broadcom_shader_stage_name(exe->stage));
+         VK_COPY_STR(ir->description, "Final QPU assembly");
          if (!write_ir_text(ir, exe->qpu_str))
             incomplete = true;
       }
@@ -3527,12 +3529,12 @@ v3dv_GetPipelineExecutablePropertiesKHR(
          gl_shader_stage mesa_stage = broadcom_shader_stage_to_gl(exe->stage);
          props->stages = mesa_to_vk_shader_stage(mesa_stage);
 
-         WRITE_STR(props->name, "%s (%s)",
+         VK_PRINT_STR(props->name, "%s (%s)",
                    _mesa_shader_stage_to_abbrev(mesa_stage),
                    broadcom_shader_stage_is_binning(exe->stage) ?
                      "Binning" : "Render");
 
-         WRITE_STR(props->description, "%s",
+         VK_COPY_STR(props->description,
                    _mesa_shader_stage_to_string(mesa_stage));
 
          props->subgroupSize = V3D_CHANNELS;
@@ -3567,57 +3569,20 @@ v3dv_GetPipelineExecutableStatisticsKHR(
                           pStatistics, pStatisticCount);
 
    if (qpu_inst_count > 0) {
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "Compile Strategy");
-         WRITE_STR(stat->description, "Chosen compile strategy index");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->compile_strategy_idx;
-      }
+      vk_add_exec_statistic_u64(out, "Compile Strategy",
+                                "Chosen compile strategy index",
+                                prog_data->compile_strategy_idx);
 
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "Instruction Count");
-         WRITE_STR(stat->description, "Number of QPU instructions");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = qpu_inst_count;
-      }
+      struct videocore_vi_stats stats = {
+         .instrs = qpu_inst_count,
+         .thread_count = prog_data->threads,
+         .spill_size = prog_data->spill_size,
+         .spills = prog_data->spill_size,
+         .fills = prog_data->spill_size,
+         .read_stalls = prog_data->qpu_read_stalls,
+      };
 
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "Thread Count");
-         WRITE_STR(stat->description, "Number of QPU threads dispatched");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->threads;
-      }
-
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "Spill Size");
-         WRITE_STR(stat->description, "Size of the spill buffer in bytes");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->spill_size;
-      }
-
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "TMU Spills");
-         WRITE_STR(stat->description, "Number of times a register was spilled "
-                                      "to memory");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->spill_size;
-      }
-
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "TMU Fills");
-         WRITE_STR(stat->description, "Number of times a register was filled "
-                                      "from memory");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->spill_size;
-      }
-
-      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-         WRITE_STR(stat->name, "QPU Read Stalls");
-         WRITE_STR(stat->description, "Number of cycles the QPU stalls for a "
-                                      "register read dependency");
-         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
-         stat->value.u64 = prog_data->qpu_read_stalls;
-      }
+      vk_add_videocore_vi_stats(out, &stats);
    }
 
    return vk_outarray_status(&out);

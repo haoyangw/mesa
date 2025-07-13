@@ -12,20 +12,13 @@
 
 #define PANVK_MAX_BUFFER_SIZE (1 << 30)
 
-VKAPI_ATTR VkDeviceAddress VKAPI_CALL
-panvk_GetBufferDeviceAddress(VkDevice _device,
-                             const VkBufferDeviceAddressInfo *pInfo)
-{
-   VK_FROM_HANDLE(panvk_buffer, buffer, pInfo->buffer);
-
-   return buffer->dev_addr;
-}
-
 VKAPI_ATTR uint64_t VKAPI_CALL
 panvk_GetBufferOpaqueCaptureAddress(VkDevice _device,
                                     const VkBufferDeviceAddressInfo *pInfo)
 {
-   return panvk_GetBufferDeviceAddress(_device, pInfo);
+   VK_FROM_HANDLE(panvk_buffer, buffer, pInfo->buffer);
+
+   return buffer->vk.device_address;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -71,8 +64,11 @@ panvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
 
       assert(mem != NULL);
 
+      assert(buffer->bo == NULL);
+      assert(buffer->vk.device_address == 0);
+
       buffer->bo = pan_kmod_bo_get(mem->bo);
-      buffer->dev_addr = mem->addr.dev + pBindInfos[i].memoryOffset;
+      buffer->vk.device_address = mem->addr.dev + pBindInfos[i].memoryOffset;
 
       /* FIXME: Only host map for index buffers so we can do the min/max
        * index retrieval on the CPU. This is all broken anyway and the
@@ -90,7 +86,9 @@ panvk_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
             pan_kmod_bo_mmap(mem->bo, map_start, map_end - map_start,
                              PROT_WRITE, MAP_SHARED, NULL);
 
-         assert(map_addr != MAP_FAILED);
+         if (map_addr == MAP_FAILED)
+            return panvk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                                "Failed to CPU map index buffer");
          buffer->host_ptr = map_addr + (offset & pgsize);
       }
 

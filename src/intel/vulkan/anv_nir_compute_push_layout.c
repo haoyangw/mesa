@@ -57,6 +57,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
                   has_const_ubo = true;
                break;
 
+            case nir_intrinsic_load_uniform:
             case nir_intrinsic_load_push_constant: {
                unsigned base = nir_intrinsic_base(intrin);
                unsigned range = nir_intrinsic_range(intrin);
@@ -96,9 +97,10 @@ anv_nir_compute_push_layout(nir_shader *nir,
        * the shader.
        */
       const uint32_t push_reg_mask_start =
-         anv_drv_const_offset(push_reg_mask[nir->info.stage]);
-      const uint32_t push_reg_mask_end = push_reg_mask_start +
-                                         anv_drv_const_size(push_reg_mask[nir->info.stage]);
+         anv_drv_const_offset(gfx.push_reg_mask[nir->info.stage]);
+      const uint32_t push_reg_mask_end =
+         push_reg_mask_start +
+         anv_drv_const_size(gfx.push_reg_mask[nir->info.stage]);
       push_start = MIN2(push_start, push_reg_mask_start);
       push_end = MAX2(push_end, push_reg_mask_end);
    }
@@ -124,8 +126,31 @@ anv_nir_compute_push_layout(nir_shader *nir,
       push_end = anv_drv_const_offset(cs.subgroup_id);
    }
 
-   /* Align push_start down to a 32B boundary and make it no larger than
-    * push_end (no push constants is indicated by push_start = UINT_MAX).
+   /* Align push_start down to a 32B (for 3DSTATE_CONSTANT) and make it no
+    * larger than push_end (no push constants is indicated by push_start =
+    * UINT_MAX).
+    *
+    * If we were to use
+    * 3DSTATE_(MESH|TASK)_SHADER_DATA::IndirectDataStartAddress we would need
+    * to align things to 64B.
+    *
+    * SKL PRMs, Volume 2d: Command Reference: Structures,
+    * 3DSTATE_CONSTANT::Constant Buffer 0 Read Length:
+    *
+    *    "This field specifies the length of the constant data to be loaded
+    *     from memory in 256-bit units."
+    *
+    * ATS-M PRMs, Volume 2d: Command Reference: Structures,
+    * 3DSTATE_MESH_SHADER_DATA_BODY::Indirect Data Start Address:
+    *
+    *    "This pointer is relative to the General State Base Address. It is
+    *     the 64-byte aligned address of the indirect data."
+    *
+    * COMPUTE_WALKER::Indirect Data Start Address has the same requirements as
+    * 3DSTATE_MESH_SHADER_DATA_BODY::Indirect Data Start Address but the push
+    * constant allocation for compute shader is not shared with other stages
+    * (unlike all Gfx stages) and so we can bound+align the allocation there
+    * (see anv_cmd_buffer_cs_push_constants).
     */
    push_start = MIN2(push_start, push_end);
    push_start = ROUND_DOWN_TO(push_start, 32);
@@ -151,6 +176,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
 
                nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
                switch (intrin->intrinsic) {
+               case nir_intrinsic_load_uniform:
                case nir_intrinsic_load_push_constant: {
                   /* With bindless shaders we load uniforms with SEND
                    * messages. All the push constants are located after the
@@ -159,8 +185,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
                    * brw_nir_lower_rt_intrinsics.c).
                    */
                   unsigned base_offset =
-                     brw_shader_stage_requires_bindless_resources(nir->info.stage) ? 0 : push_start;
-                  intrin->intrinsic = nir_intrinsic_load_uniform;
+                     brw_shader_stage_is_bindless(nir->info.stage) ? 0 : push_start;
                   nir_intrinsic_set_base(intrin,
                                          nir_intrinsic_base(intrin) -
                                          base_offset);
@@ -194,7 +219,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
 
       if (robust_flags & BRW_ROBUSTNESS_UBO) {
          const uint32_t push_reg_mask_offset =
-            anv_drv_const_offset(push_reg_mask[nir->info.stage]);
+            anv_drv_const_offset(gfx.push_reg_mask[nir->info.stage]);
          assert(push_reg_mask_offset >= push_start);
          prog_data->push_reg_mask_param =
             (push_reg_mask_offset - push_start) / 4;

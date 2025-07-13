@@ -472,10 +472,6 @@ struct pipe_surface
    struct pipe_resource *texture; /**< resource into which this is a view  */
    struct pipe_context *context; /**< context this surface belongs to */
 
-   /* XXX width/height should be removed */
-   uint16_t width;               /**< logical width in pixels */
-   uint16_t height;              /**< logical height in pixels */
-
    /**
     * Number of samples for the surface.  This will be 0 if rendering
     * should use the resource's nr_samples, or another value if the resource
@@ -486,14 +482,20 @@ struct pipe_surface
    union pipe_surface_desc u;
 };
 
+struct pipe_tex2d_from_buf {
+   unsigned offset;  /**< offset in pixels */
+   uint16_t row_stride; /**< size of the image row_stride in pixels */
+   uint16_t width;      /**< width of image provided by application */
+   uint16_t height;     /**< height of image provided by application */
+};
 
 /**
  * A view into a texture that can be bound to a shader stage.
  */
 struct pipe_sampler_view
 {
-   /* Put the refcount on its own cache line to prevent "False sharing". */
-   EXCLUSIVE_CACHELINE(struct pipe_reference reference);
+   /* this refcount is non-atomic */
+   struct pipe_reference reference;
 
    enum pipe_format format:12;      /**< typed PIPE_FORMAT_x */
    unsigned astc_decode_format:2;   /**< intermediate format used for ASTC textures */
@@ -516,12 +518,7 @@ struct pipe_sampler_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the readable sub-range in bytes */
       } buf;
-      struct {
-         unsigned offset;  /**< offset in pixels */
-         uint16_t row_stride; /**< size of the image row_stride in pixels */
-         uint16_t width;      /**< width of image provided by application */
-         uint16_t height;     /**< height of image provided by application */
-      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
+      struct pipe_tex2d_from_buf tex2d_from_buf; /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -552,12 +549,7 @@ struct pipe_image_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the accessible sub-range in bytes */
       } buf;
-      struct {
-         unsigned offset;   /**< offset in pixels */
-         uint16_t row_stride;     /**< size of the image row_stride in pixels */
-         uint16_t width;     /**< width of image provided by application */
-         uint16_t height;     /**< height of image provided by application */
-      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
+      struct pipe_tex2d_from_buf tex2d_from_buf; /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -950,7 +942,7 @@ struct pipe_blit_info
 struct pipe_grid_info
 {
    /**
-    * For drivers that use PIPE_SHADER_IR_NATIVE as their prefered IR, this
+    * For drivers that use PIPE_SHADER_IR_NATIVE as their preferred IR, this
     * value will be the index of the kernel in the opencl.kernels metadata
     * list.
     */

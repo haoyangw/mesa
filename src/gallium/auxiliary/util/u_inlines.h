@@ -96,6 +96,37 @@ pipe_reference_described(struct pipe_reference *dst,
    return false;
 }
 
+/**
+ * Update reference counting.
+ * The old thing pointed to, if any, will be unreferenced.
+ * Both 'dst' and 'src' may be NULL.
+ * \return TRUE if the object's refcount hits zero and should be destroyed.
+ */
+static inline bool
+pipe_reference_described_nonatomic(struct pipe_reference *dst,
+                                   struct pipe_reference *src,
+                                   debug_reference_descriptor get_desc)
+{
+   if (dst != src) {
+      /* bump the src.count first */
+      if (src) {
+         ASSERTED int64_t count = ++src->count;
+         assert(count != 1); /* src had to be referenced */
+         debug_reference(src, get_desc, 1);
+      }
+
+      if (dst) {
+         int64_t count = --dst->count;
+         assert(count != -1); /* dst had to be referenced */
+         debug_reference(dst, get_desc, -1);
+         if (!count)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 static inline bool
 pipe_reference(struct pipe_reference *dst, struct pipe_reference *src)
 {
@@ -210,12 +241,44 @@ pipe_sampler_view_reference(struct pipe_sampler_view **dst,
 {
    struct pipe_sampler_view *old_dst = *dst;
 
-   if (pipe_reference_described(old_dst ? &old_dst->reference : NULL,
-                                src ? &src->reference : NULL,
-                                (debug_reference_descriptor)
-                                debug_describe_sampler_view))
+   if (pipe_reference_described_nonatomic(old_dst ? &old_dst->reference : NULL,
+                                          src ? &src->reference : NULL,
+                                          (debug_reference_descriptor)
+                                          debug_describe_sampler_view))
       old_dst->context->sampler_view_destroy(old_dst->context, old_dst);
    *dst = src;
+}
+
+static inline void
+pipe_sampler_view_release(struct pipe_sampler_view *view)
+{
+   if (view)
+      view->context->sampler_view_release(view->context, view);
+}
+
+static inline void
+pipe_sampler_view_release_ptr(struct pipe_sampler_view **view_ptr)
+{
+   struct pipe_sampler_view *view = *view_ptr;
+   *view_ptr = NULL;
+   if (view)
+      view->context->sampler_view_release(view->context, view);
+}
+
+static inline void
+pipe_sampler_view_set_release(struct pipe_sampler_view **dst,
+                              struct pipe_sampler_view *src)
+{
+   struct pipe_sampler_view *old_dst = *dst;
+   *dst = src;
+   if (old_dst)
+      old_dst->context->sampler_view_release(old_dst->context, old_dst);
+}
+
+static inline void
+u_default_sampler_view_release(struct pipe_context *pctx, struct pipe_sampler_view *view)
+{
+   pipe_sampler_view_reference(&view, NULL);
 }
 
 static inline void
@@ -282,8 +345,6 @@ pipe_surface_reset(struct pipe_context *ctx, struct pipe_surface* ps,
 {
    pipe_resource_reference(&ps->texture, pt);
    ps->format = pt->format;
-   ps->width = (uint16_t)u_minify(pt->width0, level);
-   ps->height = (uint16_t)u_minify(pt->height0, level);
    ps->u.tex.level = level;
    ps->u.tex.first_layer = ps->u.tex.last_layer = layer;
    ps->context = ctx;
@@ -296,6 +357,67 @@ pipe_surface_init(struct pipe_context *ctx, struct pipe_surface* ps,
    ps->texture = 0;
    pipe_reference_init(&ps->reference, 1);
    pipe_surface_reset(ctx, ps, pt, level, layer);
+}
+
+static inline unsigned
+pipe_surface_width(const struct pipe_surface *ps)
+{
+   if (ps->texture->target == PIPE_BUFFER) {
+      /* TODO: delete clover */
+      return ps->u.buf.last_element - ps->u.buf.first_element + 1;
+   }
+
+   unsigned width = (uint16_t)u_minify(ps->texture->width0, ps->u.tex.level);
+
+   /* adjust texture view size to get full blocksize on compressed formats */
+   if (!util_format_is_depth_or_stencil(ps->texture->format) && ps->format != ps->texture->format) {
+      const struct util_format_description *res_desc = util_format_description(ps->texture->format);
+      const struct util_format_description *surf_desc = util_format_description(ps->format);
+
+      if (res_desc->block.width != surf_desc->block.width ||
+          res_desc->block.height != surf_desc->block.height) {
+         unsigned nblks_x = util_format_get_nblocksx(ps->texture->format, width);
+         width = nblks_x * surf_desc->block.width;
+      }
+   }
+
+   return width;
+}
+
+static inline unsigned
+pipe_surface_height(const struct pipe_surface *ps)
+{
+   if (ps->texture->target == PIPE_BUFFER) {
+      /* TODO: delete clover */
+      return ps->texture->height0;
+   }
+
+   unsigned height = u_minify(ps->texture->height0, ps->u.tex.level);
+
+   /* adjust texture view size to get full blocksize on compressed formats */
+   if (!util_format_is_depth_or_stencil(ps->texture->format) && ps->format != ps->texture->format) {
+      const struct util_format_description *res_desc = util_format_description(ps->texture->format);
+      const struct util_format_description *surf_desc = util_format_description(ps->format);
+
+      if (res_desc->block.width != surf_desc->block.width ||
+          res_desc->block.height != surf_desc->block.height) {
+
+         unsigned nblks_y = util_format_get_nblocksy(ps->texture->format, height);
+         height = nblks_y * surf_desc->block.height;
+      }
+   }
+
+   return height;
+}
+
+static inline void
+pipe_surface_size(const struct pipe_surface *ps, uint16_t *width, uint16_t *height)
+{
+   if (width)
+      *width = (uint16_t)pipe_surface_width(ps);
+
+   if (height)
+      *height = (uint16_t)pipe_surface_height(ps);
 }
 
 /* Return true if the surfaces are equal. */

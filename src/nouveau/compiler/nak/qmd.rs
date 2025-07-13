@@ -5,7 +5,7 @@ extern crate nvidia_headers;
 
 use compiler::bindings::*;
 use nak_bindings::*;
-use nvidia_headers::classes::{cla0c0, clc0c0, clc3c0, clc6c0};
+use nvidia_headers::classes::{cla0c0, clc0c0, clc3c0, clc6c0, clcbc0};
 
 use bitview::*;
 use paste::paste;
@@ -113,36 +113,62 @@ macro_rules! qmd_impl_set_crs_size {
     };
 }
 
-const SIZE_SHIFT: u8 = 0;
-const SIZE_SHIFTED4_SHIFT: u8 = 4;
+const CBUF_NONE_SHIFT: u8 = 0;
+const CBUF_SHIFTED4_SHIFT: u8 = 4;
+const CBUF_SHIFTED6_SHIFT: u8 = 6;
+
+macro_rules! cbuf_suffix_shift {
+    ($suffix:ident) => {
+        paste! { [<CBUF_ $suffix _SHIFT>] }
+    };
+}
+
+macro_rules! cbuf_suffix_field {
+    ($c:ident, $s:ident, $field:ident, NONE) => {
+        paste! { $c::[<$s _CONSTANT_BUFFER_ $field>] }
+    };
+    ($c:ident, $s:ident, $field:ident, $suffix:ident) => {
+        paste! { $c::[<$s _CONSTANT_BUFFER_ $field _ $suffix>] }
+    };
+}
 
 macro_rules! qmd_impl_set_cbuf {
-    ($c:ident, $s:ident, $size_field:ident) => {
+    ($c:ident, $s:ident, $addr_suffix:ident, $size_suffix:ident) => {
         fn set_cbuf(&mut self, idx: u8, addr: u64, size: u32) {
             let mut bv = QMDBitView::new(&mut self.qmd);
             let idx = idx.into();
 
-            let addr_lo = addr as u32;
-            let addr_hi = (addr >> 32) as u32;
-            set_array!(bv, $c, $s, CONSTANT_BUFFER_ADDR_LOWER, idx, addr_lo);
-            set_array!(bv, $c, $s, CONSTANT_BUFFER_ADDR_UPPER, idx, addr_hi);
+            let addr_shift = cbuf_suffix_shift!($addr_suffix);
+            let addr_shifted = addr >> addr_shift;
+            assert!((addr_shifted << addr_shift) == addr);
+            bv.set_field(
+                cbuf_suffix_field!($c, $s, ADDR_LOWER, $addr_suffix)(idx),
+                addr_shifted as u32,
+            );
+            bv.set_field(
+                cbuf_suffix_field!($c, $s, ADDR_UPPER, $addr_suffix)(idx),
+                (addr_shifted >> 32) as u32,
+            );
 
-            paste! {
-                let shift = [<$size_field _SHIFT>];
-                let range = $c::[<$s _CONSTANT_BUFFER_ $size_field>](idx);
-                assert!(((size >> shift) << shift) == size);
-                bv.set_field(range, size >> shift);
-            }
+            let size_shift = cbuf_suffix_shift!($size_suffix);
+            assert!(((size >> size_shift) << size_shift) == size);
+            bv.set_field(
+                cbuf_suffix_field!($c, $s, SIZE, $size_suffix)(idx),
+                size >> size_shift,
+            );
 
             set_array!(bv, $c, $s, CONSTANT_BUFFER_VALID, idx, true);
         }
 
         fn cbuf_desc_layout(idx: u8) -> nak_qmd_cbuf_desc_layout {
-            let lo =
-                paste! {$c::[<$s _CONSTANT_BUFFER_ADDR_LOWER>]}(idx.into());
-            let hi =
-                paste! {$c::[<$s _CONSTANT_BUFFER_ADDR_UPPER>]}(idx.into());
+            let lo = cbuf_suffix_field!($c, $s, ADDR_LOWER, $addr_suffix)(
+                idx.into(),
+            );
+            let hi = cbuf_suffix_field!($c, $s, ADDR_UPPER, $addr_suffix)(
+                idx.into(),
+            );
             nak_qmd_cbuf_desc_layout {
+                addr_shift: cbuf_suffix_shift!($addr_suffix).into(),
                 addr_lo_start: lo.start as u16,
                 addr_lo_end: lo.end as u16,
                 addr_hi_start: hi.start as u16,
@@ -203,7 +229,7 @@ mod qmd_0_6 {
 
         qmd_impl_common!(cla0c0, QMDV00_06);
         qmd_impl_set_crs_size!(cla0c0, QMDV00_06);
-        qmd_impl_set_cbuf!(cla0c0, QMDV00_06, SIZE);
+        qmd_impl_set_cbuf!(cla0c0, QMDV00_06, NONE, NONE);
         qmd_impl_set_prog_addr_32!(cla0c0, QMDV00_06);
         qmd_impl_set_register_count!(cla0c0, QMDV00_06, REGISTER_COUNT);
 
@@ -248,7 +274,7 @@ mod qmd_2_1 {
 
         qmd_impl_common!(clc0c0, QMDV02_01);
         qmd_impl_set_crs_size!(clc0c0, QMDV02_01);
-        qmd_impl_set_cbuf!(clc0c0, QMDV02_01, SIZE_SHIFTED4);
+        qmd_impl_set_cbuf!(clc0c0, QMDV02_01, NONE, SHIFTED4);
         qmd_impl_set_prog_addr_32!(clc0c0, QMDV02_01);
         qmd_impl_set_register_count!(clc0c0, QMDV02_01, REGISTER_COUNT);
 
@@ -316,7 +342,7 @@ mod qmd_2_2 {
 
         qmd_impl_common!(clc3c0, QMDV02_02);
         qmd_impl_set_crs_size!(clc3c0, QMDV02_02);
-        qmd_impl_set_cbuf!(clc3c0, QMDV02_02, SIZE_SHIFTED4);
+        qmd_impl_set_cbuf!(clc3c0, QMDV02_02, NONE, SHIFTED4);
         qmd_impl_set_prog_addr_64!(clc3c0, QMDV02_02);
         qmd_impl_set_register_count!(clc3c0, QMDV02_02, REGISTER_COUNT_V);
         qmd_impl_set_smem_size_bounded!(clc3c0, QMDV02_02);
@@ -348,13 +374,52 @@ mod qmd_3_0 {
             assert!(crs_size == 0);
         }
 
-        qmd_impl_set_cbuf!(clc6c0, QMDV03_00, SIZE_SHIFTED4);
+        qmd_impl_set_cbuf!(clc6c0, QMDV03_00, NONE, SHIFTED4);
         qmd_impl_set_prog_addr_64!(clc6c0, QMDV03_00);
         qmd_impl_set_register_count!(clc6c0, QMDV03_00, REGISTER_COUNT_V);
         qmd_impl_set_smem_size_bounded!(clc6c0, QMDV03_00);
     }
 }
 use qmd_3_0::Qmd3_0;
+
+mod qmd_4_0 {
+    use crate::qmd::*;
+    mod clcbc0 {
+        pub use nvidia_headers::classes::clcbc0::qmd::*;
+
+        // Some renames we have to carry for Hopper
+        pub use QMDV04_00_GRID_DEPTH as QMDV04_00_CTA_RASTER_DEPTH;
+        pub use QMDV04_00_GRID_HEIGHT as QMDV04_00_CTA_RASTER_HEIGHT;
+        pub use QMDV04_00_GRID_WIDTH as QMDV04_00_CTA_RASTER_WIDTH;
+        pub use QMDV04_00_QMD_MINOR_VERSION as QMDV04_00_QMD_VERSION;
+    }
+
+    #[repr(transparent)]
+    pub struct Qmd4_0 {
+        qmd: [u32; 64],
+    }
+
+    impl QMD for Qmd4_0 {
+        fn new() -> Self {
+            let mut qmd = [0; 64];
+            let mut bv = QMDBitView::new(&mut qmd);
+            qmd_init!(bv, clcbc0, QMDV04_00, 4, 0);
+            Self { qmd }
+        }
+
+        qmd_impl_common!(clcbc0, QMDV04_00);
+
+        fn set_crs_size(&mut self, crs_size: u32) {
+            assert!(crs_size == 0);
+        }
+
+        qmd_impl_set_cbuf!(clcbc0, QMDV04_00, SHIFTED6, SHIFTED4);
+        qmd_impl_set_prog_addr_64!(clcbc0, QMDV04_00);
+        qmd_impl_set_register_count!(clcbc0, QMDV04_00, REGISTER_COUNT);
+        qmd_impl_set_smem_size_bounded!(clcbc0, QMDV04_00);
+    }
+}
+use qmd_4_0::Qmd4_0;
 
 fn fill_qmd<Q: QMD>(info: &nak_shader_info, qmd_info: &nak_qmd_info) -> Q {
     let cs_info = unsafe {
@@ -412,7 +477,11 @@ pub extern "C" fn nak_fill_qmd(
     let qmd_info = unsafe { &*qmd_info };
 
     unsafe {
-        if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
+        if dev.cls_compute >= clcbc0::HOPPER_COMPUTE_A {
+            let qmd_out = qmd_out as *mut Qmd4_0;
+            assert!(qmd_size == std::mem::size_of_val(&*qmd_out));
+            qmd_out.write(fill_qmd(info, qmd_info));
+        } else if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
             let qmd_out = qmd_out as *mut Qmd3_0;
             assert!(qmd_size == std::mem::size_of_val(&*qmd_out));
             qmd_out.write(fill_qmd(info, qmd_info));
@@ -438,14 +507,16 @@ pub extern "C" fn nak_fill_qmd(
 pub extern "C" fn nak_get_qmd_dispatch_size_layout(
     dev: &nv_device_info,
 ) -> nak_qmd_dispatch_size_layout {
-    if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
-        Qmd3_0::GLOBAL_SIZE_LAYOUT.try_into().unwrap()
+    if dev.cls_compute >= clcbc0::HOPPER_COMPUTE_A {
+        Qmd4_0::GLOBAL_SIZE_LAYOUT
+    } else if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
+        Qmd3_0::GLOBAL_SIZE_LAYOUT
     } else if dev.cls_compute >= clc3c0::VOLTA_COMPUTE_A {
-        Qmd2_2::GLOBAL_SIZE_LAYOUT.try_into().unwrap()
+        Qmd2_2::GLOBAL_SIZE_LAYOUT
     } else if dev.cls_compute >= clc0c0::PASCAL_COMPUTE_A {
-        Qmd2_1::GLOBAL_SIZE_LAYOUT.try_into().unwrap()
+        Qmd2_1::GLOBAL_SIZE_LAYOUT
     } else if dev.cls_compute >= cla0c0::KEPLER_COMPUTE_A {
-        Qmd0_6::GLOBAL_SIZE_LAYOUT.try_into().unwrap()
+        Qmd0_6::GLOBAL_SIZE_LAYOUT
     } else {
         panic!("Unsupported shader model");
     }
@@ -456,7 +527,9 @@ pub extern "C" fn nak_get_qmd_cbuf_desc_layout(
     dev: &nv_device_info,
     idx: u8,
 ) -> nak_qmd_cbuf_desc_layout {
-    if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
+    if dev.cls_compute >= clcbc0::HOPPER_COMPUTE_A {
+        Qmd4_0::cbuf_desc_layout(idx.into())
+    } else if dev.cls_compute >= clc6c0::AMPERE_COMPUTE_A {
         Qmd3_0::cbuf_desc_layout(idx.into())
     } else if dev.cls_compute >= clc3c0::VOLTA_COMPUTE_A {
         Qmd2_2::cbuf_desc_layout(idx.into())

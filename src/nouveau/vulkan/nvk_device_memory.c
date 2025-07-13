@@ -65,7 +65,7 @@ nvk_GetMemoryFdPropertiesKHR(VkDevice device,
                              VkMemoryFdPropertiesKHR *pMemoryFdProperties)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nvkmd_mem *mem;
    VkResult result;
 
@@ -82,10 +82,22 @@ nvk_GetMemoryFdPropertiesKHR(VkDevice device,
 
    uint32_t type_bits = 0;
    if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
-      /* We allow a dma-buf to be imported anywhere because there's no way
-       * for us to actually know where it came from.
-       */
-      type_bits = BITFIELD_MASK(pdev->mem_type_count);
+      for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
+         const VkMemoryType *type = &pdev->mem_types[t];
+         const enum nvkmd_mem_flags type_flags =
+            nvk_memory_type_flags(type, handleType);
+
+         /* Flags required to be set on mem to be imported as type
+          *
+          * If we're importing into a host-visible heap, we have to be able to
+          * map the memory.
+          */
+         const enum nvkmd_mem_flags req_flags = type_flags & NVKMD_MEM_CAN_MAP;
+         if (req_flags & ~mem->flags)
+            continue;
+
+         type_bits |= (1 << t);
+      }
    } else {
       for (unsigned t = 0; t < ARRAY_SIZE(pdev->mem_types); t++) {
          const enum nvkmd_mem_flags flags =
@@ -109,7 +121,7 @@ nvk_AllocateMemory(VkDevice device,
                    VkDeviceMemory *pMem)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   struct nvk_physical_device *pdev = nvk_device_physical_mut(dev);
    struct nvk_device_memory *mem;
    VkResult result = VK_SUCCESS;
 
@@ -189,7 +201,9 @@ nvk_AllocateMemory(VkDevice device,
          goto fail_alloc;
    }
 
-   if ((pdev->debug_flags & NVK_DEBUG_ZERO_MEMORY) && !is_import) {
+   if (!is_import && (pdev->debug_flags & (NVK_DEBUG_ZERO_MEMORY |
+                                           NVK_DEBUG_TRASH_MEMORY))) {
+      bool use_zero = (pdev->debug_flags & NVK_DEBUG_ZERO_MEMORY) != 0;
       if (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
          void *map;
          result = nvkmd_mem_map(mem->mem, &dev->vk.base,
@@ -197,12 +211,13 @@ nvk_AllocateMemory(VkDevice device,
          if (result != VK_SUCCESS)
             goto fail_mem;
 
-         memset(map, 0, mem->mem->size_B);
+         memset(map, use_zero ? 0 : 0xF1, mem->mem->size_B);
          nvkmd_mem_unmap(mem->mem, 0);
       } else {
          result = nvk_upload_queue_fill(dev, &dev->upload,
                                         mem->mem->va->addr,
-                                        0, mem->mem->size_B);
+                                        use_zero ? 0 : 0xCAFEF00D,
+                                        mem->mem->size_B);
          if (result != VK_SUCCESS)
             goto fail_mem;
 
@@ -247,7 +262,7 @@ nvk_FreeMemory(VkDevice device,
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
    VK_FROM_HANDLE(nvk_device_memory, mem, _mem);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   struct nvk_physical_device *pdev = nvk_device_physical_mut(dev);
 
    if (!mem)
       return;

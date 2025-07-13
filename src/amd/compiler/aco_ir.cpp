@@ -75,6 +75,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       case GFX10: program->family = CHIP_NAVI10; break;
       case GFX10_3: program->family = CHIP_NAVI21; break;
       case GFX11: program->family = CHIP_NAVI31; break;
+      case GFX11_5: program->family = CHIP_GFX1150; break;
       case GFX12: program->family = CHIP_GFX1200; break;
       default: program->family = CHIP_UNKNOWN; break;
       }
@@ -95,7 +96,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    /* apparently gfx702 also has 16-bank LDS but I can't find a family for that */
    program->dev.has_16bank_lds = family == CHIP_KABINI || family == CHIP_STONEY;
 
-   program->dev.vgpr_limit = stage == raytracing_cs ? 128 : 256;
+   program->dev.vgpr_limit = 256;
    program->dev.physical_vgprs = 256;
    program->dev.vgpr_alloc_granule = 4;
 
@@ -128,6 +129,9 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       program->dev.sgpr_limit = 104;
    }
 
+   if (program->stage == raytracing_cs)
+      program->dev.vgpr_limit = util_align_npot(128, program->dev.vgpr_alloc_granule);
+
    program->dev.scratch_alloc_granule = gfx_level >= GFX11 ? 256 : 1024;
 
    program->dev.max_waves_per_simd = 10;
@@ -151,7 +155,9 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    default: break;
    }
 
-   program->dev.sram_ecc_enabled = program->family == CHIP_MI100;
+   program->dev.sram_ecc_enabled = program->family == CHIP_VEGA20 ||
+                                   program->family == CHIP_MI100 || program->family == CHIP_MI200 ||
+                                   program->family == CHIP_GFX940;
    /* apparently gfx702 also has fast v_fma_f32 but I can't find a family for that */
    program->dev.has_fast_fma32 = program->gfx_level >= GFX9;
    if (program->family == CHIP_TAHITI || program->family == CHIP_CARRIZO ||
@@ -855,7 +861,8 @@ needs_exec_mask(const Instruction* instr)
 
    if (instr->isSALU() || instr->isBranch() || instr->isSMEM() || instr->isBarrier())
       return instr->opcode == aco_opcode::s_cbranch_execz ||
-             instr->opcode == aco_opcode::s_cbranch_execnz || instr->reads_exec();
+             instr->opcode == aco_opcode::s_cbranch_execnz ||
+             instr->opcode == aco_opcode::s_setpc_b64 || instr->reads_exec();
 
    if (instr->isPseudo()) {
       switch (instr->opcode) {
@@ -1379,8 +1386,11 @@ should_form_clause(const Instruction* a, const Instruction* b)
    if (a->definitions.empty() != b->definitions.empty())
       return false;
 
-   if (a->format != b->format)
+   /* MUBUF and MTBUF can appear in the same clause. */
+   if ((a->isMTBUF() && b->isMUBUF()) || (a->isMUBUF() && b->isMTBUF())) {
+   } else if (a->format != b->format) {
       return false;
+   }
 
    if (a->operands.empty() || b->operands.empty())
       return false;
@@ -1430,15 +1440,20 @@ get_op_fixed_to_def(Instruction* instr)
 uint8_t
 get_vmem_type(enum amd_gfx_level gfx_level, Instruction* instr)
 {
-   if (instr->opcode == aco_opcode::image_bvh64_intersect_ray)
+   if (instr->opcode == aco_opcode::image_bvh64_intersect_ray) {
       return vmem_bvh;
-   else if (gfx_level >= GFX12 && instr->opcode == aco_opcode::image_msaa_load)
+   } else if (gfx_level >= GFX12 && instr->opcode == aco_opcode::image_msaa_load) {
       return vmem_sampler;
-   else if (instr->isMIMG() && !instr->operands[1].isUndefined() &&
-            instr->operands[1].regClass() == s4)
-      return vmem_sampler;
-   else if (instr->isVMEM() || instr->isScratch() || instr->isGlobal())
+   } else if (instr->isMIMG() && !instr->operands[1].isUndefined() &&
+              instr->operands[1].regClass() == s4) {
+      bool point_sample_accel =
+         gfx_level == GFX11_5 && (instr->opcode == aco_opcode::image_sample ||
+                                  instr->opcode == aco_opcode::image_sample_l ||
+                                  instr->opcode == aco_opcode::image_sample_lz);
+      return vmem_sampler | (point_sample_accel ? vmem_nosampler : 0);
+   } else if (instr->isVMEM() || instr->isScratch() || instr->isGlobal()) {
       return vmem_nosampler;
+   }
    return 0;
 }
 

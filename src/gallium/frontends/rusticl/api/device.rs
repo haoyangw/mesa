@@ -16,13 +16,16 @@ use std::ffi::CStr;
 use std::mem::size_of;
 use std::ptr;
 
-const SPIRV_SUPPORT_STRING: &CStr = c"SPIR-V_1.0 SPIR-V_1.1 SPIR-V_1.2 SPIR-V_1.3 SPIR-V_1.4";
-const SPIRV_SUPPORT: [cl_name_version; 5] = [
+const SPIRV_SUPPORT_STRING: &CStr =
+    c"SPIR-V_1.0 SPIR-V_1.1 SPIR-V_1.2 SPIR-V_1.3 SPIR-V_1.4 SPIR-V_1.5 SPIR-V_1.6";
+const SPIRV_SUPPORT: [cl_name_version; 7] = [
     mk_cl_version_ext(1, 0, 0, "SPIR-V"),
     mk_cl_version_ext(1, 1, 0, "SPIR-V"),
     mk_cl_version_ext(1, 2, 0, "SPIR-V"),
     mk_cl_version_ext(1, 3, 0, "SPIR-V"),
     mk_cl_version_ext(1, 4, 0, "SPIR-V"),
+    mk_cl_version_ext(1, 5, 0, "SPIR-V"),
+    mk_cl_version_ext(1, 6, 0, "SPIR-V"),
 ];
 type ClDevIdpAccelProps = cl_device_integer_dot_product_acceleration_properties_khr;
 
@@ -343,9 +346,16 @@ fn get_device_ids(
         return Err(CL_DEVICE_NOT_FOUND);
     }
 
+    debug_assert!(
+        devs.len() <= cl_uint::MAX as usize,
+        "number of available devices exceeds `cl_uint::MAX`"
+    );
+
     // num_devices returns the number of OpenCL devices available that match device_type. If
     // num_devices is NULL, this argument is ignored.
-    num_devices.write_checked(devs.len() as cl_uint);
+    // SAFETY: Caller is responsible for providing a null pointer or one valid
+    // for a write of `size_of::<cl_uint>()`.
+    unsafe { num_devices.write_checked(devs.len() as cl_uint) };
 
     if !devices.is_null() {
         let n = min(num_entries as usize, devs.len());
@@ -426,7 +436,9 @@ fn get_host_timer(device_id: cl_device_id, host_timestamp: *mut cl_ulong) -> CLR
     }
 
     // Currently the best clock we have for the host_timestamp
-    host_timestamp.write_checked(device.screen().get_timestamp());
+    // SAFETY: Caller is responsible for providing a pointer valid for a write
+    // of `size_of::<cl_ulong>()`.
+    unsafe { host_timestamp.write_checked(device.screen().get_timestamp()) };
 
     Ok(())
 }

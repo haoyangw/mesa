@@ -134,7 +134,7 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
                               VkDescriptorSetLayout *pSetLayout)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -164,7 +164,7 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
    VK_MULTIALLOC_DECL(&ma, struct nvk_sampler *, samplers,
                       immutable_sampler_count);
 
-   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma))
+   if (!vk_descriptor_set_layout_multizalloc(&dev->vk, &ma, pCreateInfo))
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    layout->vk.destroy = nvk_descriptor_set_layout_destroy;
@@ -386,7 +386,7 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
                                   VkDescriptorSetLayoutSupport *pSupport)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,

@@ -638,7 +638,16 @@ void trace_dump_sampler_view_template(const struct pipe_sampler_view *state)
 
    trace_dump_member_begin("u");
    trace_dump_struct_begin(""); /* anonymous */
-   if (state->target == PIPE_BUFFER) {
+   if (state->is_tex2d_from_buf) {
+      trace_dump_member_begin("tex2d_from_buf");
+      trace_dump_struct_begin(""); /* anonymous */
+      trace_dump_member(uint, &state->u.tex2d_from_buf, offset);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, row_stride);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, width);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, height);
+      trace_dump_struct_end(); /* anonymous */
+      trace_dump_member_end(); /* buf */
+   } else if (state->target == PIPE_BUFFER) {
       trace_dump_member_begin("buf");
       trace_dump_struct_begin(""); /* anonymous */
       trace_dump_member(uint, &state->u.buf, offset);
@@ -688,8 +697,6 @@ void trace_dump_surface_template(const struct pipe_surface *state,
 
    trace_dump_member(format, state, format);
    trace_dump_member(ptr, state, texture);
-   trace_dump_member(uint, state, width);
-   trace_dump_member(uint, state, height);
 
    trace_dump_member_begin("target");
    trace_dump_enum(tr_util_pipe_texture_target_name(target));
@@ -849,7 +856,16 @@ void trace_dump_image_view(const struct pipe_image_view *state)
 
    trace_dump_member_begin("u");
    trace_dump_struct_begin(""); /* anonymous */
-   if (state->resource->target == PIPE_BUFFER) {
+   if (state->access & PIPE_IMAGE_ACCESS_TEX2D_FROM_BUFFER) {
+      trace_dump_member_begin("tex2d_from_buf");
+      trace_dump_struct_begin(""); /* anonymous */
+      trace_dump_member(uint, &state->u.tex2d_from_buf, offset);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, row_stride);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, width);
+      trace_dump_member(uint, &state->u.tex2d_from_buf, height);
+      trace_dump_struct_end(); /* anonymous */
+      trace_dump_member_end(); /* buf */
+   } else if (state->resource->target == PIPE_BUFFER) {
       trace_dump_member_begin("buf");
       trace_dump_struct_begin(""); /* anonymous */
       trace_dump_member(uint, &state->u.buf, offset);

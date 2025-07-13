@@ -3,7 +3,10 @@ from typing import TYPE_CHECKING, Any
 
 from ruamel.yaml import YAML
 
-from lava.utils.lava_farm import LavaFarm, get_lava_farm
+from os import getenv
+
+from lava.utils.lava_farm import get_lava_farm
+from lava.utils.log_section import LAVA_DEPLOY_TIMEOUT
 from lava.utils.ssh_job_definition import (
     generate_docker_test,
     generate_dut_test,
@@ -23,7 +26,12 @@ from lava.utils.uart_job_definition import (
 if TYPE_CHECKING:
     from lava.lava_job_submitter import LAVAJobSubmitter
 
-from .constants import FORCE_UART, JOB_PRIORITY, NUMBER_OF_ATTEMPTS_LAVA_BOOT
+from .constants import (
+    FORCE_UART,
+    JOB_PRIORITY,
+    NUMBER_OF_ATTEMPTS_LAVA_BOOT,
+    NUMBER_OF_ATTEMPTS_LAVA_DEPLOY,
+)
 
 
 class LAVAJobDefinition:
@@ -38,6 +46,9 @@ class LAVAJobDefinition:
         self.lava_nfs_args: str = "root=/dev/nfs rw nfsroot=$NFS_SERVER_IP:$NFS_ROOTFS,tcp,hard,v3 ip=dhcp"
         # extra_nfsroot_args appends to cmdline
         self.extra_nfsroot_args: str = " init=/init rootwait usbcore.quirks=0bda:8153:k"
+        # Append LAVA_CMDLINE to extra_nfsroot_args
+        if lava_cmdline := getenv('LAVA_CMDLINE'):
+            self.extra_nfsroot_args += f" {lava_cmdline}"
 
     def has_ssh_support(self) -> bool:
         if FORCE_UART:
@@ -47,7 +58,7 @@ class LAVAJobDefinition:
         # which is required to follow the job in a SSH section
         current_farm = get_lava_farm()
 
-        return current_farm == LavaFarm.COLLABORA
+        return current_farm == "collabora"
 
     def generate_lava_yaml_payload(self) -> dict[str, Any]:
         """
@@ -149,18 +160,15 @@ class LAVAJobDefinition:
                 "job": {"minutes": self.job_submitter.job_timeout_min},
                 "actions": {
                     "depthcharge-retry": {
-                        # Could take between 1 and 1.5 min in slower boots
-                        "minutes": 4
-                    },
-                    "depthcharge-start": {
-                        # Should take less than 1 min.
-                        "minutes": 1,
+                        # Setting higher values here, to affect the subactions, namely
+                        # `bootloader-commands` and `login-action`
+                        # So this value can be higher than `depthcharge-action` timeout.
+                        "minutes": 3 * NUMBER_OF_ATTEMPTS_LAVA_DEPLOY
                     },
                     "depthcharge-action": {
                         # This timeout englobes the entire depthcharge timing,
                         # including retries
-                        "minutes": 5
-                        * NUMBER_OF_ATTEMPTS_LAVA_BOOT,
+                        "minutes": LAVA_DEPLOY_TIMEOUT
                     },
                     "uboot-action": {
                         # For rockchip DUTs, U-Boot auto-login action downloads the kernel and
@@ -168,9 +176,10 @@ class LAVAJobDefinition:
                         # The LAVA action that wraps it is `uboot-commands`, but we can't set a
                         # timeout for it directly, it is overridden by one third of `uboot-action`
                         # timeout.
-                        # So actually, this timeout is here to enforce that `uboot-commands`
-                        # timeout to be 100 seconds (300 sec / 3), which is more than enough.
-                        "minutes": 5
+                        # So actually, this timeout is here to enforce that `uboot-action`
+                        # timeout to be 100 seconds (uboot-action timeout /
+                        # NUMBER_OF_ATTEMPTS_LAVA_BOOT), which is more than enough.
+                        "seconds": 100 * NUMBER_OF_ATTEMPTS_LAVA_BOOT
                     },
                 },
             },

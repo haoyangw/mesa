@@ -56,6 +56,7 @@ struct lower_descriptors_ctx {
 
    bool use_bindless_cbuf;
    bool use_edb_buffer_views;
+   bool use_nak;
    bool clamp_desc_array_bounds;
    bool indirect_bind;
    nir_address_format ubo_addr_format;
@@ -1300,7 +1301,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          load_resource_deref_desc(b, 1, 32, texture, plane_offset_B, ctx);
 
    nir_def *combined_handle;
-   if (texture == sampler) {
+   if (texture == sampler || !nir_tex_instr_need_sampler(tex)) {
       combined_handle = texture_desc;
    } else {
       combined_handle = nir_iand_imm(b, texture_desc,
@@ -1317,7 +1318,8 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    }
 
    /* TODO: The nv50 back-end assumes it's 64-bit because of GL */
-   combined_handle = nir_u2u64(b, combined_handle);
+   if (!ctx->use_nak)
+      combined_handle = nir_u2u64(b, combined_handle);
 
    /* TODO: The nv50 back-end assumes it gets handles both places, even for
     * texelFetch.
@@ -1585,6 +1587,8 @@ nvk_nir_lower_descriptors(nir_shader *nir,
       .dev_info = &pdev->info,
       .use_bindless_cbuf = nvk_use_bindless_cbuf(&pdev->info),
       .use_edb_buffer_views = nvk_use_edb_buffer_views(pdev),
+      .use_nak = (nvk_nak_stages(&pdev->info) &
+                  mesa_to_vk_shader_stage(nir->info.stage)) != 0,
       .clamp_desc_array_bounds =
          rs->storage_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
          rs->uniform_buffers != VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||

@@ -17,10 +17,12 @@
 #include "radv_instance.h"
 #include "radv_queue.h"
 #include "radv_radeon_winsys.h"
+#include "ac_uvd_dec.h"
 #include "ac_vcn_enc.h"
 #include "wsi_common.h"
 
-#include "nir.h"
+#include "nir_shader_compiler_options.h"
+#include "compiler/shader_enums.h"
 
 #include "vk_physical_device.h"
 
@@ -45,6 +47,7 @@ struct radv_physical_device_cache_key {
    uint32_t disable_aniso_single_level : 1;
    uint32_t disable_shrink_image_store : 1;
    uint32_t disable_sinking_load_input_fs : 1;
+   uint32_t disable_trunc_coord : 1;
    uint32_t emulate_rt : 1;
    uint32_t ge_wave32 : 1;
    uint32_t invariant_geom : 1;
@@ -60,6 +63,8 @@ struct radv_physical_device_cache_key {
    uint32_t use_llvm : 1;
    uint32_t use_ngg : 1;
    uint32_t use_ngg_culling : 1;
+
+   uint32_t reserved : 10;
 };
 
 enum radv_video_enc_hw_ver {
@@ -93,6 +98,9 @@ struct radv_physical_device {
 
    /* Whether to enable FMASK compression for MSAA textures (GFX6-GFX10.3) */
    bool use_fmask;
+
+   /* Whether to enable HTILE compression for depth/stencil images. */
+   bool use_hiz;
 
    /* Whether to enable NGG. */
    bool use_ngg;
@@ -173,8 +181,7 @@ struct radv_physical_device {
    } vid_dec_reg;
    enum amd_ip_type vid_decode_ip;
    uint32_t vid_addr_gfx_mode;
-   uint32_t stream_handle_base;
-   uint32_t stream_handle_counter;
+   struct ac_uvd_stream_handle stream_handle;
    uint32_t av1_version;
    rvcn_enc_cmd_t vcn_enc_cmds;
    enum radv_video_enc_hw_ver enc_hw_ver;
@@ -195,13 +202,13 @@ radv_physical_device_instance(const struct radv_physical_device *pdev)
 }
 
 static inline bool
-radv_sparse_queue_enabled(const struct radv_physical_device *pdev)
+radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
     * VK_DEVICE_TIMELINE_MODE_EMULATED. */
-   return pdev->info.has_timeline_syncobj && !instance->drirc.legacy_sparse_binding;
+   return pdev->info.has_timeline_syncobj && !instance->drirc.disable_dedicated_sparse_queue;
 }
 
 static inline bool
@@ -262,5 +269,7 @@ VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drm
                                     struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
+
+bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 
 #endif /* RADV_PHYSICAL_DEVICE_H */

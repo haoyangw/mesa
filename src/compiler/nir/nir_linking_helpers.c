@@ -1074,7 +1074,7 @@ replace_varying_input_by_constant_load(nir_shader *shader,
       }
    }
 
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 static bool
@@ -1120,7 +1120,7 @@ replace_duplicate_input(nir_shader *shader, nir_variable *input_var,
       }
    }
 
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 static bool
@@ -1288,7 +1288,7 @@ replace_varying_input_by_uniform_load(nir_shader *shader,
       }
    }
 
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 /* The GLSL ES 3.20 spec says:

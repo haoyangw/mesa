@@ -367,14 +367,13 @@ init_context(isel_context* ctx, nir_shader* shader)
    uint32_t options =
       shader->options->divergence_analysis_options | nir_divergence_ignore_undef_if_phi_srcs;
    nir_divergence_analysis_impl(impl, (nir_divergence_options)options);
-   shader->info.divergence_analysis_run = true;
 
    apply_nuw_to_offsets(ctx, impl);
    ac_nir_flag_smem_for_loads(shader, ctx->program->gfx_level, false, true);
 
    /* sanitize control flow */
    sanitize_cf_list(impl, &impl->body);
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 
    /* we'll need these for isel */
    nir_metadata_require(impl, nir_metadata_block_index);

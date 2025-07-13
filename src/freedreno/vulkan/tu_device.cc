@@ -72,6 +72,7 @@ tu_device_get_cache_uuid(struct tu_physical_device *device, void *uuid)
 
    _mesa_sha1_update(&ctx, &family, sizeof(family));
    _mesa_sha1_update(&ctx, &driver_flags, sizeof(driver_flags));
+   _mesa_sha1_update(&ctx, &device->uche_trap_base, sizeof(device->uche_trap_base));
    _mesa_sha1_final(&ctx, sha1);
 
    memcpy(uuid, sha1, VK_UUID_SIZE);
@@ -196,9 +197,11 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_maintenance4 = true,
       .KHR_maintenance5 = true,
       .KHR_maintenance6 = true,
+      .KHR_maintenance7 = true,
+      .KHR_maintenance8 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = TU_DEBUG(NOCONFORM) ? true : device->info->a6xx.has_hw_multiview,
-      .KHR_performance_query = TU_DEBUG(PERFC),
+      .KHR_performance_query = TU_DEBUG(PERFC) || TU_DEBUG(PERFCRAW),
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef TU_USE_WSI_PLATFORM
@@ -220,6 +223,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = device->info->a7xx.has_64b_ssbo_atomics,
+      .KHR_shader_clock = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
@@ -271,9 +275,11 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_external_memory_dma_buf = true,
       .EXT_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
+      .EXT_fragment_density_map_offset = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_hdr_metadata = true,
       .EXT_host_image_copy = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
@@ -330,6 +336,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .GOOGLE_user_type = true,
       .IMG_filter_cubic = device->info->a6xx.has_tex_filter_cubic,
       .NV_compute_shader_derivatives = device->info->chip >= 7,
+      .QCOM_fragment_density_map_offset = true,
       .VALVE_mutable_descriptor_type = true,
    } };
 
@@ -515,6 +522,12 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_maintenance6 */
    features->maintenance6 = true;
 
+   /* VK_KHR_maintenance7 */
+   features->maintenance7 = true;
+
+   /* VK_KHR_maintenance8 */
+   features->maintenance8 = true;
+
    /* VK_KHR_performance_query */
    features->performanceCounterQueryPools = true;
    features->performanceCounterMultipleQueryPools = false;
@@ -527,6 +540,10 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_KHR_present_wait */
    features->presentWait = pdevice->vk.supported_extensions.KHR_present_wait;
+
+   /* VK_KHR_shader_clock */
+   features->shaderSubgroupClock = true;
+   features->shaderDeviceClock = true;
 
    /* VK_KHR_shader_expect_assume */
    features->shaderExpectAssume = true;
@@ -738,6 +755,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_subgroup_rotate */
    features->shaderSubgroupRotate = true;
    features->shaderSubgroupRotateClustered = true;
+
+   /* VK_EXT_fragment_density_map_offset */
+   features->fragmentDensityMapOffset = true;
 }
 
 static void
@@ -1277,6 +1297,28 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->maxCombinedImageSamplerDescriptorCount = 1;
    props->fragmentShadingRateClampCombinerInputs = true;
 
+   /* VK_KHR_maintenance7 */
+   props->robustFragmentShadingRateAttachmentAccess = true;
+   /* For D24S8, storing depth or stencil forces a load and store of the other
+    * component.
+    */
+   props->separateDepthStencilAttachmentAccess = false;
+   /* Uniform and storage buffers are different sizes, so we can't allow the
+    * user to freely mix them and count both against a shared limit. We have
+    * to force the user to use at most MAX_DYNAMIC_UNIFORM_BUFFERS uniform
+    * buffers and MAX_DYNAMIC_STORAGE_BUFFERS storage buffers and set the
+    * combined limit to the sum (which makes it redundant since the user will
+    * always hit the other limits first).
+    */
+   props->maxDescriptorSetTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS;
+   props->maxDescriptorSetTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS;
+   props->maxDescriptorSetTotalBuffersDynamic =
+      MAX_DYNAMIC_UNIFORM_BUFFERS + MAX_DYNAMIC_STORAGE_BUFFERS;
+   props->maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS;
+   props->maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS;
+   props->maxDescriptorSetUpdateAfterBindTotalBuffersDynamic =
+      MAX_DYNAMIC_UNIFORM_BUFFERS + MAX_DYNAMIC_STORAGE_BUFFERS;
+
    /* VK_EXT_host_image_copy */
 
    /* We don't use the layouts ATM so just report all layouts from
@@ -1354,6 +1396,11 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->degenerateLinesRasterized = false;
    props->fullyCoveredFragmentShaderInputVariable = false;
    props->conservativeRasterizationPostDepthCoverage = false;
+
+   /* VK_QCOM_fragment_density_map_offset */
+   props->fragmentDensityOffsetGranularity = (VkExtent2D) { 
+      TU_FDM_OFFSET_GRANULARITY, TU_FDM_OFFSET_GRANULARITY
+   };
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
@@ -1595,6 +1642,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_DONT_RESERVE_DESCRIPTOR_SET(false)
       DRI_CONF_TU_ALLOW_OOB_INDIRECT_UBO_LOADS(false)
       DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(false)
+      DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(false)
    DRI_CONF_SECTION_END
 };
 
@@ -1617,6 +1665,8 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_allow_oob_indirect_ubo_loads");
    instance->disable_d24s8_border_color_workaround =
          driQueryOptionb(&instance->dri_options, "tu_disable_d24s8_border_color_workaround");
+   instance->use_tex_coord_round_nearest_even_mode =
+         driQueryOptionb(&instance->dri_options, "tu_use_tex_coord_round_nearest_even_mode");
 }
 
 static uint32_t instance_count = 0;
@@ -1947,7 +1997,8 @@ tu_trace_record_ts(struct u_trace *ut, void *cs, void *timestamps,
 
 static uint64_t
 tu_trace_read_ts(struct u_trace_context *utctx,
-                 void *timestamps, uint64_t offset_B, void *flush_data)
+                 void *timestamps, uint64_t offset_B,
+                 uint32_t flags, void *flush_data)
 {
    struct tu_device *device =
       container_of(utctx, struct tu_device, trace_context);
@@ -2323,7 +2374,7 @@ tu_init_cmdbuf_start_a725_quirk(struct tu_device *device)
             .threadmode = MULTI,
             .threadsize = THREAD128,
             .mergedregs = true));
-   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_UNKNOWN_A9B1(.shared_size = 1));
+   tu_cs_emit_regs(&sub_cs, A6XX_SP_CS_CTRL_REG1(.shared_size = 1));
    tu_cs_emit_regs(&sub_cs, HLSQ_CS_KERNEL_GROUP_X(A7XX, 1),
                      HLSQ_CS_KERNEL_GROUP_Y(A7XX, 1),
                      HLSQ_CS_KERNEL_GROUP_Z(A7XX, 1));
@@ -2474,6 +2525,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    mtx_init(&device->pipeline_mutex, mtx_plain);
    mtx_init(&device->autotune_mutex, mtx_plain);
    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
+   mtx_init(&device->event_mutex, mtx_plain);
    u_rwlock_init(&device->dma_bo_lock);
    pthread_mutex_init(&device->submit_mutex, NULL);
 
@@ -2490,7 +2542,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       tu_memory_trace_init(device);
 
    /* kgsl is not a drm device: */
-   if (!is_kgsl(physical_device->instance))
+   if (!is_kgsl(physical_device->instance) && (device->fd >= 0))
       vk_device_set_drm_fd(&device->vk, device->fd);
 
    struct tu6_global *global = NULL;
@@ -2543,6 +2595,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
          .storage_16bit = physical_device->info->a6xx.storage_16bit,
          .storage_8bit = physical_device->info->a7xx.storage_8bit,
          .shared_push_consts = !TU_DEBUG(PUSH_CONSTS_PER_STAGE),
+         .uche_trap_base = physical_device->uche_trap_base,
       };
       device->compiler = ir3_compiler_create(
          NULL, &physical_device->dev_id, physical_device->info, &ir3_options);
@@ -2589,6 +2642,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                               128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
                               "kgsl_profiling_suballoc");
    }
+
+   tu_bo_suballocator_init(&device->event_suballoc, device,
+      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+      "event_suballoc");
 
    result = tu_bo_init_new(
       device, NULL, &device->global_bo, global_size,
@@ -2899,6 +2956,7 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    tu_bo_suballocator_finish(&device->pipeline_suballoc);
    tu_bo_suballocator_finish(&device->autotune_suballoc);
    tu_bo_suballocator_finish(&device->kgsl_profiling_suballoc);
+   tu_bo_suballocator_finish(&device->event_suballoc);
 
    tu_bo_finish(device, device->global_bo);
 

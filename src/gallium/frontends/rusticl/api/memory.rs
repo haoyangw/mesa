@@ -26,7 +26,6 @@ use std::cmp::Ordering;
 use std::mem::{self, MaybeUninit};
 use std::os::raw::c_void;
 use std::ptr;
-use std::slice;
 use std::sync::Arc;
 
 fn validate_mem_flags(flags: cl_mem_flags, images: bool) -> CLResult<()> {
@@ -917,8 +916,24 @@ fn get_supported_image_formats(
     res.sort();
     res.dedup();
 
-    num_image_formats.write_checked(res.len() as cl_uint);
-    unsafe { image_formats.copy_checked(res.as_ptr(), res.len()) };
+    debug_assert!(
+        res.len() <= cl_uint::MAX as usize,
+        "number of supported formats exceeds `cl_uint::MAX`"
+    );
+
+    // `num_image_formats` should be the full count of supported formats,
+    // regardless of the value of `num_entries`. It may be null, in which case
+    // it is ignored.
+    // SAFETY: Callers are responsible for providing either a null pointer or
+    // one for which a write of `size_of::<cl_uint>()` is valid.
+    unsafe { num_image_formats.write_checked(res.len() as cl_uint) };
+
+    // `image_formats` may be null, in which case it is ignored.
+    let num_entries_to_write = cmp::min(res.len(), num_entries as usize);
+    // SAFETY: Callers are responsible for providing either a null pointer or
+    // one for which a write of `num_entries * size_of::<cl_image_format>()` is
+    // valid. The validity of reading from `res` is guaranteed by the compiler.
+    unsafe { image_formats.copy_from_checked(res.as_ptr(), num_entries_to_write) };
 
     Ok(())
 }
@@ -1603,8 +1618,12 @@ fn enqueue_fill_buffer(
         return Err(CL_INVALID_CONTEXT);
     }
 
-    // we have to copy memory
-    let pattern = unsafe { slice::from_raw_parts(pattern.cast(), pattern_size).to_vec() };
+    // The caller may free `pattern` once the `clEnqueueFillBuffer()` call
+    // returns, so we need to duplicate its contents to hold onto.
+    // SAFETY: `cl_slice::from_raw_parts()` verifies the testable invariants of
+    // `slice::from_raw_parts()`. The caller is responsible for providing a
+    // pointer to appropriately-sized, initialized memory.
+    let pattern = unsafe { cl_slice::from_raw_parts(pattern.cast(), pattern_size)? }.to_vec();
     create_and_queue(
         q,
         CL_COMMAND_FILL_BUFFER,
@@ -2311,7 +2330,7 @@ pub fn svm_alloc(
     context: cl_context,
     flags: cl_svm_mem_flags,
     size: usize,
-    mut alignment: cl_uint,
+    alignment: cl_uint,
 ) -> CLResult<*mut c_void> {
     // clSVMAlloc will fail if
 
@@ -2328,29 +2347,33 @@ pub fn svm_alloc(
         return Err(CL_INVALID_VALUE);
     }
 
-    // size is 0 or > CL_DEVICE_MAX_MEM_ALLOC_SIZE value for any device in context.
-    if size == 0 || checked_compare(size, Ordering::Greater, c.max_mem_alloc()) {
+    let alignment = if alignment != 0 {
+        alignment as usize
+    } else {
+        // When alignment is 0, the size of the largest supported type is used.
+        // In the case of the full profile, that's `long16`.
+        mem::size_of::<[u64; 16]>()
+    };
+
+    // clSVMAlloc will fail if alignment is not a power of two.
+    // `from_size_align()` verifies this condition is met.
+    let layout = Layout::from_size_align(size, alignment).or(Err(CL_INVALID_VALUE))?;
+
+    // clSVMAlloc will fail if size is 0 or > CL_DEVICE_MAX_MEM_ALLOC_SIZE value
+    // for any device in context.
+    // Verify that the requested size, once adjusted to be a multiple of
+    // alignment, fits within the maximum allocation size. While
+    // `from_size_align()` ensures that the allocation will fit in host memory,
+    // the maximum allocation may be smaller due to limitations from gallium or
+    // devices.
+    let size_aligned = layout.pad_to_align().size();
+    if size == 0 || checked_compare(size_aligned, Ordering::Greater, c.max_mem_alloc()) {
         return Err(CL_INVALID_VALUE);
     }
 
-    if alignment == 0 {
-        alignment = mem::size_of::<[u64; 16]>() as cl_uint;
-    }
-
-    // alignment is not a power of two
-    if !alignment.is_power_of_two() {
-        return Err(CL_INVALID_VALUE);
-    }
-
-    let layout;
-    let ptr;
-
-    // SAFETY: we already verify the parameters to from_size_align above and layout is of non zero
-    // size
-    unsafe {
-        layout = Layout::from_size_align_unchecked(size, alignment as usize);
-        ptr = alloc::alloc(layout);
-    }
+    // SAFETY: `size` is verified to be non-zero and the returned pointer is not
+    // expected to point to initialized memory.
+    let ptr = unsafe { alloc::alloc(layout) };
 
     if ptr.is_null() {
         return Err(CL_OUT_OF_HOST_MEMORY);
@@ -2412,8 +2435,12 @@ fn enqueue_svm_free_impl(
     // The application is allowed to reuse or free the memory referenced by `svm_pointers` after this
     // function returns, so we have to make a copy.
     let mut svm_pointers = if !svm_pointers.is_null() {
-        // SAFETY: num_svm_pointers specifies the amount of elements in svm_pointers
-        unsafe { slice::from_raw_parts(svm_pointers.cast(), num_svm_pointers as usize) }.to_vec()
+        // SAFETY: `cl_slice::from_raw_parts()` verifies that testable
+        // invariants of `slice::from_raw_parts()` are satisfied. Callers are
+        // responsible for providing pointers to appropriately-sized,
+        // initialized memory.
+        unsafe { cl_slice::from_raw_parts(svm_pointers.cast(), num_svm_pointers as usize)? }
+            .to_vec()
     } else {
         // A slice must not be created from a raw null pointer, so simply create
         // an empty vec instead.
@@ -3139,8 +3166,12 @@ fn get_gl_object_info(
 
     match &m.gl_obj {
         Some(gl_obj) => {
-            gl_object_type.write_checked(gl_obj.gl_object_type);
-            gl_object_name.write_checked(gl_obj.gl_object_name);
+            // Either `gl_object_type` or `gl_object_name` may be null, in which
+            // case they are ignored.
+            // SAFETY: Caller is responsible for providing null pointers or ones
+            // which are valid for a write of the appropriate size.
+            unsafe { gl_object_type.write_checked(gl_obj.gl_object_type) };
+            unsafe { gl_object_name.write_checked(gl_obj.gl_object_name) };
         }
         None => {
             // CL_INVALID_GL_OBJECT if there is no GL object associated with memobj.

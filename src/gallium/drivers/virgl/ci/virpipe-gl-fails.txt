@@ -224,7 +224,6 @@ spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat3x4-m
 spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4-mat4,Fail
 spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4x2-mat4x2,Fail
 spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dmat4x3-mat4x3,Fail
-spec@arb_gpu_shader_fp64@execution@conversion@geom-conversion-explicit-dvec3-vec3,Fail
 
 spec@arb_occlusion_query@occlusion_query_conform,Fail
 spec@arb_occlusion_query@occlusion_query_meta_no_fragments,Fail
@@ -531,7 +530,7 @@ spec@glsl-1.50@execution@geometry@dynamic_input_array_index,Crash
 spec@glsl-1.50@execution@variable-indexing@vs-output-array-vec3-index-wr-before-gs,Crash
 spec@glsl-1.50@execution@variable-indexing@vs-output-array-vec4-index-wr-before-gs,Crash
 
-# since hetzner migration
+# uprev Piglit in Mesa
 spec@arb_tessellation_shader@execution@tcs-output-unmatched,Fail
 spec@arb_texture_compression_bptc@texwrap formats bordercolor,Fail
 spec@arb_texture_compression_bptc@texwrap formats bordercolor@GL_COMPRESSED_RGBA_BPTC_UNORM- border color only,Fail
@@ -545,10 +544,13 @@ spec@arb_texture_rg@texwrap formats-float bordercolor-swizzled@GL_RG16F- swizzle
 spec@arb_texture_rg@texwrap formats-float bordercolor-swizzled@GL_RG32F- swizzled- border color only,Fail
 spec@egl 1.4@eglcreatepbuffersurface and then glclear,Crash
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Crash
+spec@ext_packed_float@texwrap formats bordercolor,Fail
 spec@ext_packed_float@texwrap formats bordercolor-swizzled,Fail
 spec@ext_packed_float@texwrap formats bordercolor-swizzled@GL_R11F_G11F_B10F- swizzled- border color only,Fail
+spec@ext_packed_float@texwrap formats bordercolor@GL_R11F_G11F_B10F- border color only,Fail
 spec@ext_texture_srgb@texwrap formats bordercolor-swizzled,Fail
 spec@ext_texture_srgb@texwrap formats bordercolor-swizzled@GL_SLUMINANCE8- swizzled- border color only,Fail
 spec@ext_texture_srgb@texwrap formats bordercolor-swizzled@GL_SLUMINANCE8_ALPHA8- swizzled- border color only,Fail
 spec@ext_texture_srgb@texwrap formats bordercolor-swizzled@GL_SRGB8- swizzled- border color only,Fail
 spec@ext_texture_srgb@texwrap formats bordercolor-swizzled@GL_SRGB8_ALPHA8- swizzled- border color only,Fail
+

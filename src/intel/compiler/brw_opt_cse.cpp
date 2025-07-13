@@ -24,7 +24,7 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 
-#include "brw_fs.h"
+#include "brw_shader.h"
 #include "brw_builder.h"
 #include "brw_cfg.h"
 
@@ -33,11 +33,8 @@
  * Support for SSA-based global Common Subexpression Elimination (CSE).
  */
 
-using namespace brw;
-
 struct remap_entry {
-   fs_inst *inst;
-   bblock_t *block;
+   brw_inst *inst;
    enum brw_reg_type type;
    unsigned nr;
    bool negate;
@@ -45,7 +42,7 @@ struct remap_entry {
 };
 
 static bool
-is_expression(const fs_visitor *v, const fs_inst *const inst)
+is_expression(const brw_shader *v, const brw_inst *const inst)
 {
    switch (inst->opcode) {
    case BRW_OPCODE_MOV:
@@ -133,7 +130,7 @@ is_expression(const fs_visitor *v, const fs_inst *const inst)
    case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
       return inst->src[MEMORY_LOGICAL_MODE].ud == MEMORY_MODE_CONSTANT;
    case SHADER_OPCODE_LOAD_PAYLOAD:
-      return !is_coalescing_payload(v->devinfo, v->alloc, inst);
+      return !is_coalescing_payload(*v, inst);
    default:
       return inst->is_send_from_grf() && !inst->has_side_effects() &&
          !inst->is_volatile();
@@ -144,7 +141,7 @@ is_expression(const fs_visitor *v, const fs_inst *const inst)
  * True if the instruction should only be CSE'd within their local block.
  */
 bool
-local_only(const fs_inst *inst)
+local_only(const brw_inst *inst)
 {
    switch (inst->opcode) {
    case SHADER_OPCODE_FIND_LIVE_CHANNEL:
@@ -172,7 +169,7 @@ local_only(const fs_inst *inst)
 }
 
 static bool
-operands_match(const fs_inst *a, const fs_inst *b, bool *negate)
+operands_match(const brw_inst *a, const brw_inst *b, bool *negate)
 {
    brw_reg *xs = a->src;
    brw_reg *ys = b->src;
@@ -235,7 +232,7 @@ operands_match(const fs_inst *a, const fs_inst *b, bool *negate)
 }
 
 static bool
-instructions_match(fs_inst *a, fs_inst *b, bool *negate)
+instructions_match(brw_inst *a, brw_inst *b, bool *negate)
 {
    return a->opcode == b->opcode &&
           a->exec_size == b->exec_size &&
@@ -252,7 +249,6 @@ instructions_match(fs_inst *a, fs_inst *b, bool *negate)
           a->size_written == b->size_written &&
           a->check_tdr == b->check_tdr &&
           a->header_size == b->header_size &&
-          a->target == b->target &&
           a->sources == b->sources &&
           a->bits == b->bits &&
           operands_match(a, b, negate);
@@ -281,7 +277,7 @@ hash_reg(uint32_t hash, const brw_reg &r)
 static uint32_t
 hash_inst(const void *v)
 {
-   const fs_inst *inst = static_cast<const fs_inst *>(v);
+   const brw_inst *inst = static_cast<const brw_inst *>(v);
    uint32_t hash = 0;
 
    /* Skip dst - that would make nothing ever match */
@@ -296,7 +292,6 @@ hash_inst(const void *v)
       inst->ex_mlen,
       inst->sfid,
       inst->header_size,
-      inst->target,
 
       inst->conditional_mod,
       inst->predicate,
@@ -359,12 +354,12 @@ static bool
 cmp_func(const void *data1, const void *data2)
 {
    bool negate;
-   return instructions_match((fs_inst *) data1, (fs_inst *) data2, &negate);
+   return instructions_match((brw_inst *) data1, (brw_inst *) data2, &negate);
 }
 
 static bool
-remap_sources(fs_visitor &s, const brw::def_analysis &defs,
-              fs_inst *inst, struct remap_entry *remap_table)
+remap_sources(brw_shader &s, const brw_def_analysis &defs,
+              brw_inst *inst, struct remap_entry *remap_table)
 {
    bool progress = false;
 
@@ -396,11 +391,11 @@ remap_sources(fs_visitor &s, const brw::def_analysis &defs,
 }
 
 bool
-brw_opt_cse_defs(fs_visitor &s)
+brw_opt_cse_defs(brw_shader &s)
 {
    const intel_device_info *devinfo = s.devinfo;
-   const idom_tree &idom = s.idom_analysis.require();
-   const brw::def_analysis &defs = s.def_analysis.require();
+   const brw_idom_tree &idom = s.idom_analysis.require();
+   const brw_def_analysis &defs = s.def_analysis.require();
    bool progress = false;
    bool need_remaps = false;
 
@@ -409,10 +404,10 @@ brw_opt_cse_defs(fs_visitor &s)
    struct set *set = _mesa_set_create(NULL, NULL, cmp_func);
 
    foreach_block(block, s.cfg) {
-      fs_inst *last_flag_write = NULL;
-      fs_inst *last = NULL;
+      brw_inst *last_flag_write = NULL;
+      brw_inst *last = NULL;
 
-      foreach_inst_in_block_safe(fs_inst, inst, block) {
+      foreach_inst_in_block_safe(brw_inst, inst, block) {
          if (need_remaps)
             progress |= remap_sources(s, defs, inst, remap_table);
 
@@ -423,6 +418,24 @@ brw_opt_cse_defs(fs_visitor &s)
             last_flag_write = last;
          last = inst;
 
+         /* Discard jumps aren't represented in the CFG unfortunately, so we need
+          * to make sure that they behave as a CSE barrier, since we lack global
+          * dataflow information.  This is particularly likely to cause problems
+          * with instructions dependent on the current execution mask like
+          * SHADER_OPCODE_FIND_LIVE_CHANNEL.
+          */
+         if (inst->opcode == BRW_OPCODE_HALT ||
+             inst->opcode == SHADER_OPCODE_HALT_TARGET) {
+            /* Treat each side of the HALT separately for local_only
+             * expressions as it's altering the channel enables.
+             */
+            set_foreach(set, e) {
+               brw_inst *match = (brw_inst *) e->key;
+               if (match->block == block && local_only(match))
+                  _mesa_set_remove(set, e);
+            }
+         }
+
          if (inst->dst.is_null()) {
             bool ignored;
             if (last_flag_write && !inst->writes_accumulator &&
@@ -431,7 +444,7 @@ brw_opt_cse_defs(fs_visitor &s)
                 * which is redundant with the previous flag write in our
                 * basic block.  So we can simply remove it.
                 */
-               inst->remove(block, true);
+               inst->remove();
                last = NULL;
                progress = true;
             }
@@ -448,13 +461,13 @@ brw_opt_cse_defs(fs_visitor &s)
             struct set_entry *e =
                _mesa_set_search_or_add_pre_hashed(set, hash, inst, NULL);
             if (!e) goto out; /* out of memory error */
-            fs_inst *match = (fs_inst *) e->key;
+            brw_inst *match = (brw_inst *) e->key;
 
             /* If there was no match, move on */
             if (match == inst)
                continue;
 
-            bblock_t *def_block = defs.get_block(match->dst);
+            bblock_t *def_block = match->block;
             if (block != def_block && (local_only(inst) ||
                 !idom.dominates(def_block, block))) {
                /* If `match` doesn't dominate `inst` then remove it from
@@ -488,7 +501,6 @@ brw_opt_cse_defs(fs_visitor &s)
 
             need_remaps = true;
             remap_table[inst->dst.nr].inst = inst;
-            remap_table[inst->dst.nr].block = block;
             remap_table[inst->dst.nr].type = match->dst.type;
             remap_table[inst->dst.nr].nr = match->dst.nr;
             remap_table[inst->dst.nr].negate = negate;
@@ -503,7 +515,7 @@ brw_opt_cse_defs(fs_visitor &s)
          continue;
 
       if (!remap_table[i].still_used) {
-         remap_table[i].inst->remove(remap_table[i].block, true);
+         remap_table[i].inst->remove();
          progress = true;
       }
    }
@@ -513,9 +525,7 @@ out:
    _mesa_set_destroy(set, NULL);
 
    if (progress) {
-      s.cfg->adjust_block_ips();
-      s.invalidate_analysis(DEPENDENCY_INSTRUCTION_DATA_FLOW |
-                            DEPENDENCY_INSTRUCTION_DETAIL);
+      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS);
    }
 
    return progress;

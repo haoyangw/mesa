@@ -64,7 +64,7 @@ try_opt_bcsel_of_shuffle(nir_builder *b, nir_alu_instr *alu,
     * now and subgroup ops in the presence of discard aren't common.
     */
    if (block_has_discard)
-      return false;
+      return NULL;
 
    if (!nir_alu_src_is_trivial_ssa(alu, 0))
       return NULL;
@@ -260,10 +260,12 @@ opt_intrinsics_alu(nir_builder *b, nir_alu_instr *alu,
 }
 
 static bool
-try_opt_exclusive_scan_to_inclusive(nir_intrinsic_instr *intrin)
+try_opt_exclusive_scan_to_inclusive(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    if (intrin->def.num_components != 1)
       return false;
+
+   nir_op reduction_op = nir_intrinsic_reduction_op(intrin);
 
    nir_foreach_use_including_if(src, &intrin->def) {
       if (nir_src_is_if(src) || nir_src_parent_instr(src)->type != nir_instr_type_alu)
@@ -271,7 +273,7 @@ try_opt_exclusive_scan_to_inclusive(nir_intrinsic_instr *intrin)
 
       nir_alu_instr *alu = nir_instr_as_alu(nir_src_parent_instr(src));
 
-      if (alu->op != (nir_op)nir_intrinsic_reduction_op(intrin))
+      if (alu->op != reduction_op)
          return false;
 
       /* Don't reassociate exact float operations. */
@@ -309,13 +311,15 @@ try_opt_exclusive_scan_to_inclusive(nir_intrinsic_instr *intrin)
    }
 
    /* Convert to inclusive scan. */
-   intrin->intrinsic = nir_intrinsic_inclusive_scan;
+   nir_def *incl_scan = nir_inclusive_scan(b, intrin->src[0].ssa, .reduction_op = reduction_op);
 
    nir_foreach_use_including_if_safe(src, &intrin->def) {
       /* Remove alu. */
       nir_alu_instr *alu = nir_instr_as_alu(nir_src_parent_instr(src));
-      nir_def_replace(&alu->def, &intrin->def);
+      nir_def_replace(&alu->def, incl_scan);
    }
+
+   nir_instr_remove(&intrin->instr);
 
    return true;
 }
@@ -374,7 +378,7 @@ opt_intrinsics_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
       return progress;
    }
    case nir_intrinsic_exclusive_scan:
-      return try_opt_exclusive_scan_to_inclusive(intrin);
+      return try_opt_exclusive_scan_to_inclusive(b, intrin);
    default:
       return false;
    }
@@ -428,12 +432,9 @@ nir_opt_intrinsics(nir_shader *shader)
    bool progress = false;
 
    nir_foreach_function_impl(impl, shader) {
-      if (opt_intrinsics_impl(impl, shader->options)) {
-         progress = true;
-         nir_metadata_preserve(impl, nir_metadata_control_flow);
-      } else {
-         nir_metadata_preserve(impl, nir_metadata_all);
-      }
+      bool impl_progress = opt_intrinsics_impl(impl, shader->options);
+      progress |= nir_progress(impl_progress, impl,
+                               nir_metadata_control_flow);
    }
 
    return progress;

@@ -196,8 +196,7 @@ enum pipe_av1_enc_frame_type
    PIPE_AV1_ENC_FRAME_TYPE_KEY = 0x00,
    PIPE_AV1_ENC_FRAME_TYPE_INTER = 0x01,
    PIPE_AV1_ENC_FRAME_TYPE_INTRA_ONLY = 0x02,
-   PIPE_AV1_ENC_FRAME_TYPE_SWITCH = 0x03,
-   PIPE_AV1_ENC_FRAME_TYPE_SHOW_EXISTING = 0x04
+   PIPE_AV1_ENC_FRAME_TYPE_SWITCH = 0x03
 };
 
 enum pipe_h2645_enc_rate_control_method
@@ -1989,6 +1988,8 @@ struct pipe_vpp_desc
    enum pipe_video_vpp_color_primaries out_color_primaries;
    enum pipe_video_vpp_transfer_characteristic out_transfer_characteristics;
    enum pipe_video_vpp_matrix_coefficients out_matrix_coefficients;
+
+   enum pipe_video_vpp_filter_flag filter_flags;
 };
 
 

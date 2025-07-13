@@ -87,18 +87,6 @@ struct intel_device_info;
 #define ISL_DEV_IS_BAYTRAIL(__dev) ((__dev)->info->platform == INTEL_PLATFORM_BYT)
 #endif
 
-#ifndef ISL_DEV_USE_SEPARATE_STENCIL
-/**
- * You can define this as a compile-time constant in the CFLAGS. For example,
- * ``gcc -DISL_DEV_USE_SEPARATE_STENCIL(dev)=1 ...``.
- */
-#define ISL_DEV_USE_SEPARATE_STENCIL(__dev) ((__dev)->use_separate_stencil)
-#define ISL_DEV_USE_SEPARATE_STENCIL_SANITIZE(__dev)
-#else
-#define ISL_DEV_USE_SEPARATE_STENCIL_SANITIZE(__dev) \
-   (assert(ISL_DEV_USE_SEPARATE_STENCIL(__dev) == (__dev)->use_separate_stencil))
-#endif
-
 /**
  * Hardware enumeration SURFACE_FORMAT.
  *
@@ -1152,6 +1140,7 @@ typedef uint64_t isl_surf_usage_flags_t;
 #define ISL_SURF_USAGE_BLITTER_SRC_BIT         (1u << 23)
 #define ISL_SURF_USAGE_MULTI_ENGINE_SEQ_BIT    (1u << 24)
 #define ISL_SURF_USAGE_MULTI_ENGINE_PAR_BIT    (1u << 25)
+#define ISL_SURF_USAGE_SOFTWARE_DETILING       (1u << 26)
 /** @} */
 
 /**
@@ -1168,6 +1157,18 @@ typedef uint8_t isl_channel_mask_t;
 #define ISL_CHANNEL_RED_BIT   (1 << 2)
 #define ISL_CHANNEL_ALPHA_BIT (1 << 3)
 /** @} */
+
+/**
+ * Address swizzles are expressed in uint8_t with the top 4bits being the
+ * component/sample and the bottom 4bits being the bit index in the component.
+ */
+#define ISL_ADDR_SWIZ_U(val) ((0 << 4) | (val))
+#define ISL_ADDR_SWIZ_V(val) ((1 << 4) | (val))
+#define ISL_ADDR_SWIZ_R(val) ((2 << 4) | (val))
+#define ISL_ADDR_SWIZ_S(val) ((3 << 4) | (val))
+
+#define ISL_ADDR_SWIZ_COMPONENT(item) ((item) >> 4)
+#define ISL_ADDR_SWIZ_INDEX(item)     ((item) & 0xf)
 
 /**
  * @brief A channel select (also known as texture swizzle) value
@@ -1279,6 +1280,13 @@ struct isl_device {
    bool has_bit6_swizzling;
 
    /**
+    * Tiling use for software detiling in shaders
+    *
+    * Used to implement image 64bits atomic
+    */
+   enum isl_tiling shader_tiling;
+
+   /**
     * Describes the layout of a RENDER_SURFACE_STATE structure for the
     * current gen.
     */
@@ -1334,6 +1342,7 @@ struct isl_device {
 
    /* Options to configure by the driver: */
    bool sampler_route_to_lsc;
+   bool l1_storage_wt;
 
    /**
     * Write buffer length in the upper dword of the
@@ -1500,7 +1509,42 @@ struct isl_tile_info {
     * See :c:member:`isl_surf.row_pitch_B`
     */
    struct isl_extent2d phys_extent_B;
+
+   /**
+    * Swizzle of the virtual address
+    */
+   const uint8_t *swiz;
+
+   /**
+    * Number of bit swizzles in swiz[]
+    */
+   uint8_t swiz_count;
 };
+
+typedef union {
+   uint8_t values[4];
+   struct {
+      uint8_t w;
+      uint8_t h;
+      uint8_t d;
+      uint8_t a;
+   };
+} isl_tile_extent;
+
+static inline isl_tile_extent
+isl_swizzle_get_tile_coefficients(const uint8_t *swiz,
+                                  uint8_t swiz_count,
+                                  unsigned bs)
+{
+   isl_tile_extent extent = {};
+   for (uint32_t i = ffs(bs) - 1; i < swiz_count; i++) {
+      extent.values[ISL_ADDR_SWIZ_COMPONENT(swiz[i])] =
+         MAX2(extent.values[ISL_ADDR_SWIZ_COMPONENT(swiz[i])],
+              ISL_ADDR_SWIZ_INDEX(swiz[i]) + 1);
+   }
+
+   return extent;
+}
 
 /**
  * Metadata about a DRM format modifier.
@@ -1841,6 +1885,11 @@ struct isl_buffer_fill_state_info {
    uint32_t stride_B;
 
    bool is_scratch;
+
+   /**
+    * Indicates the usage of the buffer
+    */
+   isl_surf_usage_flags_t usage;
 };
 
 struct isl_depth_stencil_hiz_emit_info {
@@ -1929,6 +1978,18 @@ struct isl_cpb_emit_info {
     * The Memory Object Control state for the surface.
     */
    uint32_t mocs;
+
+   /**
+    * Aux usage of the CPB surface
+    */
+   enum isl_aux_usage aux_usage;
+};
+
+enum isl_surf_param {
+   ISL_SURF_PARAM_BASE_ADDRESSS,
+   ISL_SURF_PARAM_TILE_MODE,
+   ISL_SURF_PARAM_PITCH,
+   ISL_SURF_PARAM_QPITCH,
 };
 
 /*
@@ -1980,6 +2041,9 @@ extern const uint16_t isl_format_name_offsets[];
 void
 isl_device_init(struct isl_device *dev,
                 const struct intel_device_info *info);
+
+isl_tiling_flags_t
+isl_device_get_supported_tilings(const struct isl_device *dev);
 
 isl_sample_count_mask_t ATTRIBUTE_CONST
 isl_device_get_sample_counts(const struct isl_device *dev);
@@ -2241,6 +2305,11 @@ isl_lower_storage_image_format(const struct intel_device_info *devinfo,
 bool
 isl_has_matching_typed_storage_image_format(const struct intel_device_info *devinfo,
                                             enum isl_format fmt);
+
+bool
+isl_tiling_supports_dimensions(const struct intel_device_info *devinfo,
+                               enum isl_tiling tiling,
+                               enum isl_surf_dim dim);
 
 void
 isl_tiling_get_info(enum isl_tiling tiling,

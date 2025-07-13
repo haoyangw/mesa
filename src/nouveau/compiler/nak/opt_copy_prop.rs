@@ -41,9 +41,22 @@ struct PrmtEntry {
     srcs: [Src; 2],
 }
 
+/// This entry tracks b2i conversions
+struct ConvBoolToInt {
+    src: Src,
+}
+
+/// This entry tracks i2b conversions
+struct ConvIntToBool {
+    src: Src,
+    inverted: bool,
+}
+
 enum CopyPropEntry {
     Copy(CopyEntry),
     Prmt(PrmtEntry),
+    ConvBoolToInt(ConvBoolToInt),
+    ConvIntToBool(ConvIntToBool),
 }
 
 struct CopyPropPass {
@@ -67,6 +80,22 @@ impl CopyPropPass {
         assert!(src.src_ref.get_reg().is_none());
         self.ssa_map
             .insert(dst, CopyPropEntry::Copy(CopyEntry { bi, src_type, src }));
+    }
+
+    fn add_b2i(&mut self, dst: SSAValue, src: Src) {
+        assert!(src.src_ref.get_reg().is_none());
+        assert!(dst.is_gpr());
+        self.ssa_map
+            .insert(dst, CopyPropEntry::ConvBoolToInt(ConvBoolToInt { src }));
+    }
+
+    fn add_i2b(&mut self, dst: SSAValue, src: Src, inverted: bool) {
+        assert!(src.src_ref.get_reg().is_none());
+        assert!(dst.is_predicate());
+        self.ssa_map.insert(
+            dst,
+            CopyPropEntry::ConvIntToBool(ConvIntToBool { src, inverted }),
+        );
     }
 
     fn add_prmt(
@@ -166,7 +195,7 @@ impl CopyPropPass {
                 continue;
             };
 
-            if entry.src.src_mod.is_none() {
+            if entry.src.is_unmodified() {
                 if let SrcRef::SSA(entry_ssa) = entry.src.src_ref {
                     assert!(entry_ssa.comps() == 1);
                     *c_ssa = entry_ssa[0];
@@ -179,7 +208,7 @@ impl CopyPropPass {
     }
 
     fn prop_to_ssa_src(&self, src: &mut Src) {
-        assert!(src.src_mod.is_none());
+        assert!(src.is_unmodified());
         if let SrcRef::SSA(src_ssa) = &mut src.src_ref {
             loop {
                 if !self.prop_to_ssa_ref(src_ssa) {
@@ -245,8 +274,7 @@ impl CopyPropPass {
                     }
 
                     // If there are modifiers, the source types have to match
-                    if !entry.src.src_mod.is_none()
-                        && entry.src_type != src_type
+                    if !entry.src.is_unmodified() && entry.src_type != src_type
                     {
                         return;
                     }
@@ -322,6 +350,30 @@ impl CopyPropPass {
                     src.src_mod = entry_src.src_mod.modify(src.src_mod);
                     src.src_swizzle = new_swizzle;
                 }
+                CopyPropEntry::ConvIntToBool(entry) => {
+                    // Fold i2b(b2i(x))
+                    // Don't worry about CBuf rules, they cannot be used
+                    // in bool-int-bool conversions as they cannot be dsts
+
+                    // entry := i2b(current)
+                    // find parent: parent := b2i(entry)
+                    let parent =
+                        entry.src.as_ssa().and_then(|x| self.get_copy(&x[0]));
+                    let Some(CopyPropEntry::ConvBoolToInt(par_entry)) = parent
+                    else {
+                        return;
+                    };
+
+                    src.src_ref = par_entry.src.src_ref;
+                    src.src_mod = par_entry.src.src_mod.modify(src.src_mod);
+                    if entry.inverted {
+                        src.src_mod = src.src_mod.bnot();
+                    }
+                }
+                CopyPropEntry::ConvBoolToInt(_) => {
+                    // b2i(i2b(x)) can't be easily optimized
+                    return;
+                }
             }
         }
     }
@@ -341,7 +393,7 @@ impl CopyPropPass {
             // source modifiers as needed when propagating the high bits.
             let lo_entry_or_none = self.get_copy(&src_ssa[0]);
             if let Some(CopyPropEntry::Copy(lo_entry)) = lo_entry_or_none {
-                if lo_entry.src.src_mod.is_none() {
+                if lo_entry.src.is_unmodified() {
                     if let SrcRef::SSA(lo_entry_ssa) = lo_entry.src.src_ref {
                         src_ssa[0] = lo_entry_ssa[0];
                         continue;
@@ -351,7 +403,7 @@ impl CopyPropPass {
 
             let hi_entry_or_none = self.get_copy(&src_ssa[1]);
             if let Some(CopyPropEntry::Copy(hi_entry)) = hi_entry_or_none {
-                if hi_entry.src.src_mod.is_none()
+                if hi_entry.src.is_unmodified()
                     || hi_entry.src_type == SrcType::F64
                 {
                     if let SrcRef::SSA(hi_entry_ssa) = hi_entry.src.src_ref {
@@ -370,11 +422,11 @@ impl CopyPropPass {
                 return;
             };
 
-            if !lo_entry.src.src_mod.is_none() {
+            if !lo_entry.src.is_unmodified() {
                 return;
             }
 
-            if !hi_entry.src.src_mod.is_none()
+            if !hi_entry.src.is_unmodified()
                 && hi_entry.src_type != SrcType::F64
             {
                 return;
@@ -557,6 +609,43 @@ impl CopyPropPass {
                     }
                 }
             }
+            Op::Sel(sel) => {
+                let dst = sel.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                let dst = dst[0];
+
+                let src = match (sel.srcs[0], sel.srcs[1]) {
+                    (z, u) if z.is_zero() && u.is_nonzero() => sel.cond.bnot(),
+                    (u, z) if z.is_zero() && u.is_nonzero() => sel.cond,
+                    _ => return,
+                };
+
+                self.add_b2i(dst, src);
+            }
+            Op::ISetP(isetp) if isetp.set_op.is_trivial(&isetp.accum) => {
+                let dst = isetp.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                let dst = dst[0];
+
+                let src = match (isetp.srcs[0], isetp.srcs[1]) {
+                    (z, x) | (x, z) if z.is_zero() => x,
+                    _ => return,
+                };
+
+                // -0 = 0
+                // -x != 0 => x != 0
+                if !matches!(src.src_mod, SrcMod::None | SrcMod::INeg) {
+                    return;
+                }
+
+                // x op 0
+                let inverted = match isetp.cmp_op {
+                    IntCmpOp::Eq => true,
+                    IntCmpOp::Ne => false,
+                    _ => return,
+                };
+                self.add_i2b(dst, src, inverted);
+            }
             Op::IAdd2(add) => {
                 let dst = add.dst.as_ssa().unwrap();
                 assert!(dst.comps() == 1);
@@ -599,7 +688,7 @@ impl CopyPropPass {
                 }
             }
             Op::R2UR(r2ur) => {
-                assert!(r2ur.src.src_mod.is_none());
+                assert!(r2ur.src.is_unmodified());
                 if r2ur.src.is_uniform() {
                     let dst = r2ur.dst.as_ssa().unwrap();
                     assert!(dst.comps() == 1);
@@ -650,6 +739,8 @@ impl CopyPropPass {
                     Op::IAdd3X(add) => {
                         !add.overflow[0].is_none() || !add.overflow[1].is_none()
                     }
+                    Op::Lea(lea) => !lea.overflow.is_none(),
+                    Op::LeaX(lea) => !lea.overflow.is_none(),
                     _ => false,
                 };
 
@@ -658,7 +749,9 @@ impl CopyPropPass {
                     let mut src_type = src_types[i];
                     if force_alu_src_type {
                         src_type = match src_type {
-                            SrcType::B32 | SrcType::I32 => SrcType::ALU,
+                            SrcType::ALU | SrcType::B32 | SrcType::I32 => {
+                                SrcType::ALU
+                            }
                             SrcType::Carry | SrcType::Pred => src_type,
                             _ => panic!("Unhandled src_type"),
                         };

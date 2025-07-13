@@ -94,6 +94,7 @@ static const struct debug_control debug_control[] = {
                     DEBUG_TES | DEBUG_GS | DEBUG_CS |
                     DEBUG_RT | DEBUG_TASK | DEBUG_MESH },
    { "rt",          DEBUG_RT },
+   { "rt_notrace",  DEBUG_RT_NO_TRACE},
    { "bvh_blas",    DEBUG_BVH_BLAS},
    { "bvh_tlas",    DEBUG_BVH_TLAS},
    { "bvh_blas_ir_hdr", DEBUG_BVH_BLAS_IR_HDR},
@@ -116,6 +117,7 @@ static const struct debug_control debug_control[] = {
    { "shader-print", DEBUG_SHADER_PRINT },
    { "cl-quiet",     DEBUG_CL_QUIET },
    { "no-send-gather", DEBUG_NO_SEND_GATHER },
+   { "shaders-lineno", DEBUG_SHADERS_LINENO },
    { NULL,    0 }
 };
 

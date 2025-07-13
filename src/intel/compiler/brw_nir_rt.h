@@ -55,7 +55,10 @@ void brw_nir_lower_shader_returns(nir_shader *shader);
 
 bool brw_nir_lower_shader_calls(nir_shader *shader, struct brw_bs_prog_key *key);
 
+bool brw_nir_lower_rt_intrinsics_pre_trace(nir_shader *nir);
+
 void brw_nir_lower_rt_intrinsics(nir_shader *shader,
+                                 const struct brw_base_prog_key *key,
                                  const struct intel_device_info *devinfo);
 void brw_nir_lower_intersection_shader(nir_shader *intersection,
                                        const nir_shader *any_hit,
@@ -67,6 +70,9 @@ brw_nir_create_raygen_trampoline(const struct brw_compiler *compiler,
 nir_shader *
 brw_nir_create_trivial_return_shader(const struct brw_compiler *compiler,
                                      void *mem_ctx);
+nir_shader *
+brw_nir_create_null_ahs_shader(const struct brw_compiler *compiler,
+                               void *mem_ctx);
 
 #ifdef __cplusplus
 }

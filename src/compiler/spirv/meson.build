@@ -62,6 +62,7 @@ libvtn = static_library(
 idep_vtn = declare_dependency(
   dependencies : [dep_spirv_tools, idep_nir, idep_mesautil],
   link_with : libvtn,
+  sources : [spirv_info_h],
 )
 
 spirv2nir = executable(
@@ -77,17 +78,14 @@ spirv2nir = executable(
   install : with_tools.contains('nir'),
 )
 
-if get_option('mesa-clc') != 'system' and (with_gallium_asahi or \
-                                           with_asahi_vk or \
-                                           with_intel_vk or \
-                                           with_gallium_iris or \
+if get_option('mesa-clc') != 'system' and (with_driver_using_cl or \
                                            get_option('install-mesa-clc'))
-   prog_vtn_bindgen = executable(
-     'vtn_bindgen',
-     ['vtn_bindgen.c'],
+   prog_vtn_bindgen2 = executable(
+     'vtn_bindgen2',
+     ['vtn_bindgen2.c'],
      include_directories : [inc_include, inc_src],
      c_args : [c_msvc_compat_args, no_override_init_args],
-     dependencies : [idep_vtn, idep_mesautil],
+     dependencies : [idep_vtn, idep_mesautil, idep_nir],
      # If we can run host binaries directly, just build vtn_bindgen for the host.
      # Most commonly this happens when doing a cross compile from an x86_64 build
      # machine to an x86 host
@@ -106,6 +104,8 @@ if with_tests
         'tests/avail_vis.cpp',
         'tests/volatile.cpp',
         'tests/control_flow_tests.cpp',
+        'tests/non_semantic.cpp',
+        'tests/workarounds.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',

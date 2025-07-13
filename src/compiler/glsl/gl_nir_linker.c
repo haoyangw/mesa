@@ -88,7 +88,13 @@ gl_nir_opts(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_if, 0);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 8, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 8,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
 
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
@@ -122,7 +128,12 @@ gl_nir_opts(nir_shader *nir)
       }
 
       NIR_PASS(progress, nir, nir_opt_undef);
-      NIR_PASS(progress, nir, nir_opt_conditional_discard);
+
+      peephole_select_options = (nir_opt_peephole_select_options){
+         .limit = 0,
+         .discard_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       if (nir->options->max_unroll_iterations ||
             (nir->options->max_unroll_iterations_fp64 &&
                (nir->options->lower_doubles_options & nir_lower_fp64_full_software))) {
@@ -1204,8 +1215,7 @@ gl_nir_add_point_size(nir_shader *nir)
    nir->info.outputs_written |= VARYING_BIT_PSIZ;
 
    /* We always modify the entrypoint */
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 static void
@@ -1240,8 +1250,7 @@ gl_nir_zero_initialize_clip_distance(nir_shader *nir)
    if (clip_dist1)
       zero_array_members(&b, clip_dist1);
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 static void
@@ -1281,11 +1290,9 @@ preprocess_shader(const struct gl_constants *consts,
    nir_shader_gather_info(prog->nir, nir_shader_get_entrypoint(prog->nir));
 
    if (prog->info.stage == MESA_SHADER_FRAGMENT && consts->HasFBFetch) {
-
       NIR_PASS(_, prog->nir, gl_nir_lower_blend_equation_advanced,
                  exts->KHR_blend_equation_advanced_coherent);
       nir_lower_global_vars_to_local(prog->nir);
-      NIR_PASS(_, prog->nir, nir_opt_combine_stores, nir_var_shader_out);
    }
 
    /* Set the next shader stage hint for VS and TES. */
@@ -1560,7 +1567,7 @@ gl_nir_lower_optimize_varyings(const struct gl_constants *consts,
        * optimizations and compaction. Do that for all inputs and outputs,
        * including VS inputs because those could have been removed too.
        */
-      NIR_PASS_V(nir, nir_recompute_io_bases,
+      NIR_PASS(_, nir, nir_recompute_io_bases,
                  nir_var_shader_in | nir_var_shader_out);
 
       /* Regenerate transform feedback info because compaction in
@@ -3905,9 +3912,10 @@ gl_nir_link_glsl(struct gl_context *ctx, struct gl_shader_program *prog)
     * stage and outputs of the last stage included in the program, since there
     * is no cross validation for these.
     */
-   gl_nir_validate_first_and_last_interface_explicit_locations(consts, prog,
-                                                               (gl_shader_stage) first,
-                                                               (gl_shader_stage) last);
+   if (!gl_nir_validate_first_and_last_interface_explicit_locations(consts, prog,
+                                                                    (gl_shader_stage)first,
+                                                                    (gl_shader_stage)last))
+      goto done;
 
    if (prog->SeparateShader)
       disable_varying_optimizations_for_sso(prog);

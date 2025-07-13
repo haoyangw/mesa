@@ -24,7 +24,7 @@ set -x
 # - the GL release produces `glcts`, and
 # - the GLES release produces `deqp-gles*` and `deqp-egl`
 
-DEQP_MAIN_COMMIT=a9988483c0864d7190e5e6264ccead95423dfd00
+DEQP_MAIN_COMMIT=76c1572eaba42d7ddd9bb8eb5788e52dd932068e
 DEQP_VK_VERSION=1.4.1.1
 DEQP_GL_VERSION=4.6.5.0
 DEQP_GLES_VERSION=3.2.11.0
@@ -47,6 +47,8 @@ main_cts_patch_files=(
 
 # shellcheck disable=SC2034
 vk_cts_commits_to_backport=(
+  # Stop querying device address from unbound buffers
+  046343f46f7d39d53b47842d7fd8ed3279528046
 )
 
 # shellcheck disable=SC2034
@@ -66,13 +68,6 @@ gl_cts_commits_to_backport=(
 gl_cts_patch_files=(
   build-deqp-gl_Build-Don-t-build-Vulkan-utilities-for-GL-builds.patch
 )
-
-if [ "${DEQP_TARGET}" = 'android' ]; then
-  gl_cts_patch_files+=(
-    build-deqp-gl_Allow-running-on-Android-from-the-command-line.patch
-    build-deqp-gl_Android-prints-to-stdout-instead-of-logcat.patch
-  )
-fi
 
 # shellcheck disable=SC2034
 # GLES builds also EGL
@@ -124,8 +119,8 @@ git checkout FETCH_HEAD
 DEQP_COMMIT=$(git rev-parse FETCH_HEAD)
 
 if [ "$DEQP_VERSION" = "$DEQP_MAIN_COMMIT" ]; then
-  git fetch origin main
-  if ! git merge-base --is-ancestor "$DEQP_MAIN_COMMIT" origin/main; then
+  merge_base="$(curl --fail -s https://api.github.com/repos/KhronosGroup/VK-GL-CTS/compare/main...$DEQP_MAIN_COMMIT | jq -r .merge_base_commit.sha)"
+  if [[ "$merge_base" != "$DEQP_MAIN_COMMIT" ]]; then
     echo "VK-GL-CTS commit $DEQP_MAIN_COMMIT is not a commit from the main branch."
     exit 1
   fi
@@ -172,6 +167,14 @@ done
 # libpng (sigh).  The archives get their checksums checked anyway, and git
 # always goes through ssh or https.
 python3 external/fetch_sources.py --insecure
+
+case "${DEQP_API}" in
+  VK-main)
+    # Video tests rely on external files
+    python3 external/fetch_video_decode_samples.py
+    python3 external/fetch_video_encode_samples.py
+    ;;
+esac
 
 if [[ "$DEQP_API" = tools ]]; then
   # Save the testlog stylesheets:
@@ -297,6 +300,7 @@ if [ "$DEQP_API" = tools ]; then
 fi
 
 # Remove other mustpass files, since we saved off the ones we wanted to conventient locations above.
+rm -rf assets/**/mustpass/
 rm -rf external/**/mustpass/
 rm -rf external/vulkancts/modules/vulkan/vk-main*
 rm -rf external/vulkancts/modules/vulkan/vk-default

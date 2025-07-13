@@ -9,6 +9,27 @@
 
 #include "util/u_math.h"
 
+static bool
+tex_handle_as_cbuf(nir_def *tex_h, uint32_t *cbuf_out)
+{
+   if (tex_h->parent_instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(tex_h->parent_instr);
+   if (intrin->intrinsic != nir_intrinsic_ldc_nv)
+      return false;
+
+   if (!nir_src_is_const(intrin->src[1]))
+      return false;
+
+   uint32_t idx = nir_src_as_uint(intrin->src[0]);
+   uint32_t offset = nir_src_as_uint(intrin->src[1]);
+   assert(idx < (1 << 5) && offset < (1 << 16));
+   *cbuf_out = (idx << 16) | offset;
+
+   return true;
+}
+
 static enum glsl_sampler_dim
 remap_sampler_dim(enum glsl_sampler_dim dim)
 {
@@ -50,7 +71,12 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       tex_h = nir_ior(b, nir_iand_imm(b, tex_h,  0x000fffff),
                          nir_iand_imm(b, samp_h, 0xfff00000));
    }
-   tex_h = nir_u2u32(b, tex_h);
+
+   enum nak_nir_tex_ref_type ref_type = NAK_NIR_TEX_REF_TYPE_BINDLESS;
+   if (nak->sm >= 70 && tex_handle_as_cbuf(tex_h, &tex->texture_index)) {
+      ref_type = NAK_NIR_TEX_REF_TYPE_CBUF;
+      tex_h = NULL;
+   }
 
    /* Array index is treated separately, so pull it off if we have one. */
    nir_def *arr_idx = NULL;
@@ -138,19 +164,21 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       offset_mode = NAK_NIR_OFFSET_MODE_PER_PX;
    }
 
-   nir_def *src0[4] = { NULL, };
-   nir_def *src1[4] = { NULL, };
-   unsigned src0_comps = 0, src1_comps = 0;
-
 #define PUSH(a, x) do { \
    nir_def *val = (x); \
    assert(a##_comps < ARRAY_SIZE(a)); \
    a[a##_comps++] = val; \
 } while(0)
 
+   unsigned num_backend_srcs = 0;
    if (nak->sm >= 50) {
+      nir_def *src0[4] = { NULL, };
+      nir_def *src1[4] = { NULL, };
+      unsigned src0_comps = 0, src1_comps = 0;
+
       if (tex->op == nir_texop_txd) {
-         PUSH(src0, tex_h);
+         if (tex_h != NULL)
+            PUSH(src0, tex_h);
 
          for (uint32_t i = 0; i < coord_components; i++)
             PUSH(src0, nir_channel(b, coord, i));
@@ -182,7 +210,8 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
          for (uint32_t i = 0; i < coord_components; i++)
             PUSH(src0, nir_channel(b, coord, i));
 
-         PUSH(src1, tex_h);
+         if (tex_h != NULL)
+            PUSH(src1, tex_h);
          if (ms_idx != NULL)
             PUSH(src1, ms_idx);
          if (lod != NULL)
@@ -196,32 +225,91 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
          if (z_cmpr != NULL)
             PUSH(src1, z_cmpr);
       }
+
+      num_backend_srcs = 1;
+      tex->src[0].src_type = nir_tex_src_backend1;
+      nir_src_rewrite(&tex->src[0].src, nir_vec(b, src0, src0_comps));
+
+      if (src1_comps > 0) {
+         num_backend_srcs = 2;
+         tex->src[1].src_type = nir_tex_src_backend2;
+         nir_src_rewrite(&tex->src[1].src, nir_vec(b, src1, src1_comps));
+      }
+   } else if (nak->sm >= 32) {
+      nir_def *src[8] = { NULL, };
+      unsigned src_comps = 0;
+
+      if (tex_h != NULL)
+         PUSH(src, tex_h);
+
+      if (offset != NULL && tex->op == nir_texop_txd) {
+         nir_def *arr_idx_or_zero = arr_idx ? arr_idx : nir_imm_int(b, 0);
+         // TODO: This may be backwards?
+         nir_def *arr_off = nir_prmt_nv(b, nir_imm_int(b, 0x1054),
+                                        offset, arr_idx_or_zero);
+         PUSH(src, arr_off);
+      } else if (arr_idx != NULL) {
+         PUSH(src, arr_idx);
+      }
+
+      for (uint32_t i = 0; i < coord_components; i++)
+         PUSH(src, nir_channel(b, coord, i));
+
+      if (ms_idx != NULL)
+         PUSH(src, ms_idx);
+      if (lod != NULL)
+         PUSH(src, lod);
+
+      if (tex->op != nir_texop_txd) {
+         if (offset_mode == NAK_NIR_OFFSET_MODE_AOFFI) {
+            PUSH(src, offset);
+         } else if (offset_mode == NAK_NIR_OFFSET_MODE_PER_PX) {
+            PUSH(src, nir_channel(b, offset, 0));
+            PUSH(src, nir_channel(b, offset, 1));
+         }
+      }
+
+      if (z_cmpr != NULL)
+         PUSH(src, z_cmpr);
+
+      if (tex->op == nir_texop_txd) {
+         assert(ddx->num_components == coord_components);
+         for (uint32_t i = 0; i < coord_components; i++) {
+            PUSH(src, nir_channel(b, ddx, i));
+            PUSH(src, nir_channel(b, ddy, i));
+         }
+      }
+
+      /* Both sources are vec4s so we need an even multiple of 4 */
+      while (src_comps % 4)
+         PUSH(src, nir_undef(b, 1, 32));
+
+      num_backend_srcs = 1;
+      tex->src[0].src_type = nir_tex_src_backend1;
+      nir_src_rewrite(&tex->src[0].src, nir_vec(b, src, 4));
+
+      if (src_comps > 4) {
+         num_backend_srcs = 2;
+         tex->src[1].src_type = nir_tex_src_backend2;
+         nir_src_rewrite(&tex->src[1].src, nir_vec(b, src + 4, 4));
+      }
    } else {
       unreachable("Unsupported shader model");
    }
 
-   nir_def *vec_srcs[2] = {
-      nir_vec(b, src0, src0_comps),
-      nir_vec(b, src1, src1_comps),
-   };
-
-   tex->src[0].src_type = nir_tex_src_backend1;
-   nir_src_rewrite(&tex->src[0].src, vec_srcs[0]);
-
-   tex->src[1].src_type = nir_tex_src_backend2;
-   nir_src_rewrite(&tex->src[1].src, vec_srcs[1]);
-
    /* Remove any extras */
-   while (tex->num_srcs > 2)
+   while (tex->num_srcs > num_backend_srcs)
       nir_tex_instr_remove_src(tex, tex->num_srcs - 1);
 
    tex->sampler_dim = remap_sampler_dim(tex->sampler_dim);
 
    struct nak_nir_tex_flags flags = {
+      .ref_type = ref_type,
       .lod_mode = lod_mode,
       .offset_mode = offset_mode,
       .has_z_cmpr = tex->is_shadow,
       .is_sparse = tex->is_sparse,
+      .nodep = tex->skip_helpers,
    };
    STATIC_ASSERT(sizeof(flags) == sizeof(tex->backend_flags));
    memcpy(&tex->backend_flags, &flags, sizeof(flags));
@@ -271,8 +359,11 @@ lower_txq(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       }
    }
 
-   /* TODO: We should only support 32-bit handles */
-   tex_h = nir_u2u32(b, tex_h);
+   enum nak_nir_tex_ref_type ref_type = NAK_NIR_TEX_REF_TYPE_BINDLESS;
+   if (nak->sm >= 70 && tex_handle_as_cbuf(tex_h, &tex->texture_index)) {
+      ref_type = NAK_NIR_TEX_REF_TYPE_CBUF;
+      tex_h = NULL;
+   }
 
    nir_def *txq_src;
    nir_component_mask_t mask;
@@ -281,17 +372,18 @@ lower_txq(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
       tex->op = nir_texop_hdr_dim_nv;
       if (lod == NULL)
          lod = nir_imm_int(b, 0);
-      txq_src = nir_vec2(b, tex_h, lod);
+      txq_src = tex_h != NULL ? nir_vec2(b, tex_h, lod) : lod;
       mask = BITSET_MASK(tex->def.num_components);
       break;
    case nir_texop_query_levels:
       tex->op = nir_texop_hdr_dim_nv;
-      txq_src = nir_vec2(b, tex_h, nir_imm_int(b, 0));
+      lod = nir_imm_int(b, 0);
+      txq_src = tex_h != NULL ? nir_vec2(b, tex_h, lod) : lod;
       mask = BITSET_BIT(3);
       break;
    case nir_texop_texture_samples:
       tex->op = nir_texop_tex_type_nv;
-      txq_src = tex_h;
+      txq_src = tex_h != NULL ? tex_h : nir_imm_int(b, 0);
       mask = BITSET_BIT(2);
       break;
    default:
@@ -307,12 +399,81 @@ lower_txq(nir_builder *b, nir_tex_instr *tex, const struct nak_compiler *nak)
 
    tex->sampler_dim = remap_sampler_dim(tex->sampler_dim);
 
+   struct nak_nir_tex_flags flags = {
+      .ref_type = ref_type,
+   };
+   STATIC_ASSERT(sizeof(flags) == sizeof(tex->backend_flags));
+   memcpy(&tex->backend_flags, &flags, sizeof(flags));
+
    b->cursor = nir_after_instr(&tex->instr);
 
    /* Only pick off slected components */
    tex->def.num_components = 4;
    nir_def *res = nir_channels(b, &tex->def, mask);
    nir_def_rewrite_uses_after(&tex->def, res, res->parent_instr);
+
+   return true;
+}
+
+static enum pipe_format
+format_for_bits(unsigned bits)
+{
+   switch (bits) {
+   case 8:   return PIPE_FORMAT_R8_UINT;
+   case 16:  return PIPE_FORMAT_R16_UINT;
+   case 32:  return PIPE_FORMAT_R32_UINT;
+   case 64:  return PIPE_FORMAT_R32G32_UINT;
+   case 128: return PIPE_FORMAT_R32G32B32A32_UINT;
+   default: unreachable("Unknown number of image format bits");
+   }
+}
+
+static bool
+lower_formatted_image_load(nir_builder *b, nir_intrinsic_instr *intrin,
+                           const struct nak_compiler *nak)
+{
+   enum pipe_format format = nir_intrinsic_format(intrin);
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+
+   unsigned bits = util_format_get_blocksizebits(format);
+
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_bindless_image_load:
+      intrin->intrinsic = nir_intrinsic_bindless_image_load_raw_nv;
+      break;
+   default:
+      unreachable("Unknown image intrinsic");
+   }
+
+   nir_intrinsic_set_format(intrin, format_for_bits(bits));
+
+   ASSERTED const unsigned rgba_bit_size = intrin->def.bit_size;
+   intrin->def.bit_size = 32;
+
+   nir_intrinsic_set_dest_type(intrin, nir_type_uint32);
+   const unsigned num_raw_components = DIV_ROUND_UP(bits, 32);
+   intrin->num_components = num_raw_components;
+   intrin->def.num_components = num_raw_components;
+
+   b->cursor = nir_after_instr(&intrin->instr);
+   nir_def *rgba = NULL;
+   switch (format) {
+   case PIPE_FORMAT_R64_UINT:
+   case PIPE_FORMAT_R64_SINT:
+      assert(rgba_bit_size == 64);
+      rgba = nir_vec4(b, nir_pack_64_2x32(b, &intrin->def),
+                         nir_imm_int64(b, 0),
+                         nir_imm_int64(b, 0),
+                         nir_imm_int64(b, 1));
+      break;
+   default:
+      assert(rgba_bit_size == 32);
+      rgba = nir_format_unpack_rgba(b, &intrin->def, format);
+      break;
+   }
+
+   nir_def_rewrite_uses_after(&intrin->def, rgba, rgba->parent_instr);
 
    return true;
 }
@@ -487,40 +648,52 @@ lower_image_txq(nir_builder *b, nir_intrinsic_instr *intrin,
 {
    b->cursor = nir_instr_remove(&intrin->instr);
 
-   /* TODO: We should only support 32-bit handles */
-   nir_def *img_h = nir_u2u32(b, intrin->src[0].ssa);
+   nir_def *img_h = intrin->src[0].ssa;
+
+   uint32_t texture_index = 0;
+   enum nak_nir_tex_ref_type ref_type = NAK_NIR_TEX_REF_TYPE_BINDLESS;
+   if (nak->sm >= 70 && tex_handle_as_cbuf(img_h, &texture_index)) {
+      ref_type = NAK_NIR_TEX_REF_TYPE_CBUF;
+      img_h = NULL;
+   }
 
    nir_tex_instr *txq = nir_tex_instr_create(b->shader, 1);
    txq->sampler_dim = remap_sampler_dim(nir_intrinsic_image_dim(intrin));
    txq->is_array = nir_intrinsic_image_array(intrin);
    txq->dest_type = nir_type_int32;
 
+   nir_def *txq_src;
    nir_component_mask_t mask;
    switch (intrin->intrinsic) {
    case nir_intrinsic_bindless_image_size: {
-      nir_def *lod = intrin->src[1].ssa;
-
       txq->op = nir_texop_hdr_dim_nv;
-      txq->src[0] = (nir_tex_src) {
-         .src_type = nir_tex_src_backend1,
-         .src = nir_src_for_ssa(nir_vec2(b, img_h, lod)),
-      };
+      nir_def *lod = intrin->src[1].ssa;
+      txq_src = img_h != NULL ? nir_vec2(b, img_h, lod) : lod;
       mask = BITSET_MASK(intrin->def.num_components);
       break;
    }
 
    case nir_intrinsic_bindless_image_samples:
       txq->op = nir_texop_tex_type_nv;
-      txq->src[0] = (nir_tex_src) {
-         .src_type = nir_tex_src_backend1,
-         .src = nir_src_for_ssa(img_h),
-      };
+      txq_src = img_h != NULL ? img_h : nir_imm_int(b, 0);
       mask = BITSET_BIT(2);
       break;
 
    default:
       unreachable("Invalid image query op");
    }
+
+   txq->src[0] = (nir_tex_src) {
+      .src_type = nir_tex_src_backend1,
+      .src = nir_src_for_ssa(txq_src),
+   };
+   txq->texture_index = texture_index;
+
+   struct nak_nir_tex_flags flags = {
+      .ref_type = ref_type,
+   };
+   STATIC_ASSERT(sizeof(flags) == sizeof(txq->backend_flags));
+   memcpy(&txq->backend_flags, &flags, sizeof(flags));
 
    nir_def_init(&txq->instr, &txq->def, 4, 32);
    nir_builder_instr_insert(b, &txq->instr);
@@ -563,6 +736,9 @@ lower_tex_instr(nir_builder *b, nir_instr *instr, void *_data)
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
       switch (intrin->intrinsic) {
       case nir_intrinsic_bindless_image_load:
+         if (nak->sm < 50 && lower_formatted_image_load(b, intrin, nak))
+            return true;
+         FALLTHROUGH;
       case nir_intrinsic_bindless_image_sparse_load:
          return shrink_image_load(b, intrin, nak);
       case nir_intrinsic_bindless_image_store:

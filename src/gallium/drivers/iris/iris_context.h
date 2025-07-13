@@ -590,9 +590,6 @@ struct iris_uncompiled_shader {
    /* Whether shader uses atomic operations. */
    bool uses_atomic_load_store;
 
-   /** Size (in bytes) of the kernel input data */
-   unsigned kernel_input_size;
-
    /** Size (in bytes) of the local (shared) data passed as kernel inputs */
    unsigned kernel_shared_size;
 
@@ -683,9 +680,6 @@ struct iris_compiled_shader {
    /** A list of system values to be uploaded as uniforms. */
    uint32_t *system_values;
    unsigned num_system_values;
-
-   /** Size (in bytes) of the kernel input data */
-   unsigned kernel_input_size;
 
    /** Number of constbufs expected by the shader. */
    unsigned num_cbufs;
@@ -1398,7 +1392,6 @@ void iris_finalize_program(struct iris_compiled_shader *shader,
                            uint32_t *streamout,
                            uint32_t *system_values,
                            unsigned num_system_values,
-                           unsigned kernel_input_size,
                            unsigned num_cbufs,
                            const struct iris_binding_table *bt);
 
@@ -1487,7 +1480,7 @@ int iris_get_driver_query_group_info(struct pipe_screen *pscreen,
 void gfx9_toggle_preemption(struct iris_context *ice,
                             struct iris_batch *batch,
                             const struct pipe_draw_info *draw);
-static const bool
+static bool
 iris_execute_indirect_draw_supported(const struct iris_context *ice,
                                      const struct pipe_draw_indirect_info *indirect,
                                      const struct pipe_draw_info *draw)

@@ -31,7 +31,12 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 64,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
@@ -104,11 +109,6 @@ brw_nir_from_spirv(void *mem_ctx, const uint32_t *spirv, size_t spirv_size)
 
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_lower_calls_to_builtins);
-
-   NIR_PASS_V(nir, nir_lower_printf, &(const struct nir_lower_printf_options) {
-         .ptr_bit_size               = 64,
-         .use_printf_base_identifier = true,
-      });
 
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
    NIR_PASS(_, nir, nir_lower_returns);

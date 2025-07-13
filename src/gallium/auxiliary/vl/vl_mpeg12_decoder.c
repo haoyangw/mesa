@@ -831,7 +831,7 @@ vl_mpeg12_end_frame(struct pipe_video_codec *decoder,
             vl_idct_prepare_stage2(i ? &dec->idct_c : &dec->idct_y, &buf->idct[plane]);
          else {
             dec->context->set_sampler_views(dec->context,
-                                            PIPE_SHADER_FRAGMENT, 0, 1, 0, false,
+                                            PIPE_SHADER_FRAGMENT, 0, 1, 0,
                                             &mc_source_sv[plane]);
             dec->context->bind_sampler_states(dec->context,
                                               PIPE_SHADER_FRAGMENT,
@@ -968,10 +968,7 @@ init_idct(struct vl_mpeg12_decoder *dec, const struct format_config* format_conf
 
    nr_of_idct_render_targets = dec->context->screen->caps.max_render_targets;
 
-   max_inst = dec->context->screen->get_shader_param
-   (
-      dec->context->screen, PIPE_SHADER_FRAGMENT, PIPE_SHADER_CAP_MAX_INSTRUCTIONS
-   );
+   max_inst = dec->context->screen->shader_caps[PIPE_SHADER_FRAGMENT].max_instructions;
 
    // Just assume we need 32 inst per render target, not 100% true, but should work in most cases
    if (nr_of_idct_render_targets >= 4 && max_inst >= 32*4)

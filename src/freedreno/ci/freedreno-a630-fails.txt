@@ -16,7 +16,6 @@ dEQP-GLES31.functional.texture.border_clamp.range_clamp.linear_float_color,Fail
 #
 
 
-glx@glx_arb_create_context_no_error@no error,Fail
 glx@glx-make-current,Fail
 glx@glx-multi-window-single-context,Fail
 
@@ -26,6 +25,7 @@ spec@arb_depth_buffer_float@fbo-generatemipmap-formats@GL_DEPTH_COMPONENT32F NPO
 
 spec@arb_point_sprite@arb_point_sprite-interactions 1.0,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
+spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2' on GL_PROGRAM_INPUT,Fail
 spec@arb_sample_shading@samplemask 2@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@1.000000 mask_in_one,Fail
@@ -114,7 +114,6 @@ spec@ext_framebuffer_multisample@sample-alpha-to-coverage 4 color,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 4 depth,Fail
 spec@ext_framebuffer_object@fbo-alphatest-nocolor,Fail
 spec@ext_framebuffer_object@fbo-alphatest-nocolor-ff,Fail
-spec@ext_packed_float@query-rgba-signed-components,Fail
 
 # These failures go away with FD_MESA_DEBUG=noblit, but don't seem to be related
 # to the actual mipmap generation blits (which we do fall back on)

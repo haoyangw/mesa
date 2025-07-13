@@ -409,7 +409,6 @@ job_compute_frame_tiling(struct v3dv_job *job,
    tiling->draw_tiles_y = DIV_ROUND_UP(height, tiling->tile_height);
 
    /* Size up our supertiles until we get under the limit */
-   const uint32_t max_supertiles = 256;
    tiling->supertile_width = 1;
    tiling->supertile_height = 1;
    for (;;) {
@@ -419,8 +418,16 @@ job_compute_frame_tiling(struct v3dv_job *job,
          DIV_ROUND_UP(tiling->draw_tiles_y, tiling->supertile_height);
       const uint32_t num_supertiles = tiling->frame_width_in_supertiles *
                                       tiling->frame_height_in_supertiles;
-      if (num_supertiles < max_supertiles)
+
+      /* While the hardware allows up to V3D_MAX_SUPERTILES, it doesn't allow
+       * 1xV3D_MAX_SUPERTILES or V3D_MAX_SUPERTILESx1 frame configurations; in
+       * these cases we need to increase the supertile size.
+       */
+      if (tiling->frame_width_in_supertiles < V3D_MAX_SUPERTILES &&
+          tiling->frame_height_in_supertiles < V3D_MAX_SUPERTILES &&
+          num_supertiles <= V3D_MAX_SUPERTILES) {
          break;
+      }
 
       if (tiling->supertile_width < tiling->supertile_height)
          tiling->supertile_width++;
@@ -737,46 +744,48 @@ v3dv_job_type_is_gpu(struct v3dv_job *job)
    }
 }
 
-static void
-cmd_buffer_serialize_job_if_needed(struct v3dv_cmd_buffer *cmd_buffer,
-                                   struct v3dv_job *job)
+bool
+v3dv_job_apply_barrier_state(struct v3dv_job *job,
+                             struct v3dv_barrier_state *barrier)
 {
-   assert(cmd_buffer && job);
+   assert(barrier && job);
 
    /* Serialization only affects GPU jobs, CPU jobs are always automatically
     * serialized.
     */
    if (!v3dv_job_type_is_gpu(job))
-      return;
+      return false;
 
-   uint8_t barrier_mask = cmd_buffer->state.barrier.dst_mask;
+   uint8_t barrier_mask = barrier->dst_mask;
    if (barrier_mask == 0)
-      return;
+      return false;
 
    uint8_t bit = 0;
    uint8_t *src_mask;
    if (job->type == V3DV_JOB_TYPE_GPU_CSD) {
       assert(!job->is_transfer);
       bit = V3DV_BARRIER_COMPUTE_BIT;
-      src_mask = &cmd_buffer->state.barrier.src_mask_compute;
+      src_mask = &barrier->src_mask_compute;
    } else if (job->is_transfer) {
       assert(job->type == V3DV_JOB_TYPE_GPU_CL ||
              job->type == V3DV_JOB_TYPE_GPU_CL_INCOMPLETE ||
              job->type == V3DV_JOB_TYPE_GPU_TFU);
       bit = V3DV_BARRIER_TRANSFER_BIT;
-      src_mask = &cmd_buffer->state.barrier.src_mask_transfer;
+      src_mask = &barrier->src_mask_transfer;
    } else {
       assert(job->type == V3DV_JOB_TYPE_GPU_CL ||
              job->type == V3DV_JOB_TYPE_GPU_CL_INCOMPLETE);
       bit = V3DV_BARRIER_GRAPHICS_BIT;
-      src_mask = &cmd_buffer->state.barrier.src_mask_graphics;
+      src_mask = &barrier->src_mask_graphics;
    }
 
    if (barrier_mask & bit) {
-      job->serialize = *src_mask;
+      job->serialize |= *src_mask;
       *src_mask = 0;
-      cmd_buffer->state.barrier.dst_mask &= ~bit;
+      barrier->dst_mask &= ~bit;
    }
+
+   return true;
 }
 
 void
@@ -844,7 +853,7 @@ v3dv_job_init(struct v3dv_job *job,
 
       job->is_transfer = cmd_buffer->state.is_transfer;
 
-      cmd_buffer_serialize_job_if_needed(cmd_buffer, job);
+      v3dv_job_apply_barrier_state(job, &cmd_buffer->state.barrier);
 
       job->perf = cmd_buffer->state.query.active_query.perf;
    }
@@ -1776,9 +1785,14 @@ cmd_buffer_subpass_create_job(struct v3dv_cmd_buffer *cmd_buffer,
          layers = util_last_bit(subpass->view_mask);
       }
 
+      uint32_t width =
+         state->render_area.offset.x + state->render_area.extent.width;
+      uint32_t height =
+         state->render_area.offset.y + state->render_area.extent.height;
+
       v3dv_job_start_frame(job,
-                           framebuffer->width,
-                           framebuffer->height,
+                           width,
+                           height,
                            layers,
                            true, false,
                            subpass->color_count,
@@ -2003,8 +2017,8 @@ v3dv_job_clone_in_cmd_buffer(struct v3dv_job *job,
 }
 
 void
-v3dv_cmd_buffer_merge_barrier_state(struct v3dv_barrier_state *dst,
-                                    struct v3dv_barrier_state *src)
+v3dv_merge_barrier_state(struct v3dv_barrier_state *dst,
+                         struct v3dv_barrier_state *src)
 {
    dst->dst_mask |= src->dst_mask;
 
@@ -2074,10 +2088,9 @@ cmd_buffer_execute_outside_pass(struct v3dv_cmd_buffer *primary,
       pending_barrier = secondary->state.barrier;
    }
 
-   if (pending_barrier.dst_mask) {
-      v3dv_cmd_buffer_merge_barrier_state(&primary->state.barrier,
-                                          &pending_barrier);
-   }
+   if (pending_barrier.dst_mask)
+      v3dv_merge_barrier_state(&primary->state.barrier, &pending_barrier);
+
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3408,6 +3421,15 @@ v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
                      true, true, &state);
    }
 
+   if (unlikely(V3D_DBG(SYNC))) {
+      state.src_mask_compute = V3DV_BARRIER_ALL;
+      state.src_mask_graphics = V3DV_BARRIER_ALL;
+      state.src_mask_transfer = V3DV_BARRIER_ALL;
+      state.dst_mask = V3DV_BARRIER_ALL;
+      state.bcl_image_access = ~0;
+      state.bcl_buffer_access = ~0;
+   }
+
    /* Bail if we don't relevant barriers */
    if (!state.dst_mask)
       return;
@@ -3417,7 +3439,7 @@ v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
       v3dv_cmd_buffer_finish_job(cmd_buffer);
 
    /* Update barrier state in the command buffer */
-   v3dv_cmd_buffer_merge_barrier_state(&cmd_buffer->state.barrier, &state);
+   v3dv_merge_barrier_state(&cmd_buffer->state.barrier, &state);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3894,6 +3916,7 @@ v3dv_CmdPushConstants(VkCommandBuffer commandBuffer,
 {
    V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
 
+   assert(cmd_buffer->state.push_constants_data);
    if (!memcmp((uint8_t *) cmd_buffer->state.push_constants_data + offset,
                pValues, size)) {
       return;

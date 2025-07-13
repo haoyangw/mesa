@@ -128,7 +128,7 @@ nvk_CreateBuffer(VkDevice device,
          return result;
       }
 
-      buffer->addr = buffer->va->addr;
+      buffer->vk.device_address = buffer->va->addr;
    }
 
    *pBuffer = nvk_buffer_to_handle(buffer);
@@ -160,7 +160,7 @@ nvk_GetDeviceBufferMemoryRequirements(
    VkMemoryRequirements2 *pMemoryRequirements)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const uint32_t alignment =
       nvk_get_buffer_alignment(nvk_device_physical(dev),
@@ -239,7 +239,7 @@ nvk_bind_buffer_memory(struct nvk_device *dev,
 {
    VK_FROM_HANDLE(nvk_device_memory, mem, info->memory);
    VK_FROM_HANDLE(nvk_buffer, buffer, info->buffer);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result = VK_SUCCESS;
 
    if ((pdev->debug_flags & NVK_DEBUG_PUSH_DUMP) &&
@@ -253,7 +253,8 @@ nvk_bind_buffer_memory(struct nvk_device *dev,
                                  mem->mem, info->memoryOffset,
                                  buffer->va->size_B);
    } else {
-      buffer->addr = mem->mem->va->addr + info->memoryOffset;
+      assert(buffer->vk.device_address == 0);
+      buffer->vk.device_address = mem->mem->va->addr + info->memoryOffset;
    }
 
    return result;
@@ -280,15 +281,6 @@ nvk_BindBufferMemory2(VkDevice device,
    }
 
    return first_error_or_success;
-}
-
-VKAPI_ATTR VkDeviceAddress VKAPI_CALL
-nvk_GetBufferDeviceAddress(UNUSED VkDevice device,
-                           const VkBufferDeviceAddressInfo *pInfo)
-{
-   VK_FROM_HANDLE(nvk_buffer, buffer, pInfo->buffer);
-
-   return nvk_buffer_address(buffer, 0);
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL

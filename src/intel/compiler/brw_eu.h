@@ -930,7 +930,9 @@ brw_fb_write_desc_coarse_write(const struct intel_device_info *devinfo,
 static inline bool
 lsc_opcode_has_cmask(enum lsc_opcode opcode)
 {
-   return opcode == LSC_OP_LOAD_CMASK || opcode == LSC_OP_STORE_CMASK;
+   return opcode == LSC_OP_LOAD_CMASK || opcode == LSC_OP_STORE_CMASK ||
+          opcode == LSC_OP_LOAD_CMASK_MSRT ||
+          opcode == LSC_OP_STORE_CMASK_MSRT;
 }
 
 static inline bool
@@ -943,7 +945,8 @@ static inline bool
 lsc_opcode_is_store(enum lsc_opcode opcode)
 {
    return opcode == LSC_OP_STORE ||
-          opcode == LSC_OP_STORE_CMASK;
+          opcode == LSC_OP_STORE_CMASK ||
+          opcode == LSC_OP_STORE_CMASK_MSRT;
 }
 
 static inline bool
@@ -1006,6 +1009,7 @@ lsc_op_num_data_values(unsigned _op)
    case LSC_OP_LOAD:
    case LSC_OP_LOAD_CMASK:
    case LSC_OP_FENCE:
+   case LSC_OP_LOAD_CMASK_MSRT:
       /* XXX: actually check docs */
       return 0;
    default:
@@ -1062,6 +1066,8 @@ lsc_op_to_legacy_atomic(unsigned _op)
    case LSC_OP_STORE:
    case LSC_OP_STORE_CMASK:
    case LSC_OP_FENCE:
+   case LSC_OP_LOAD_CMASK_MSRT:
+   case LSC_OP_STORE_CMASK_MSRT:
       unreachable("not an atomic op");
    }
 
@@ -1419,6 +1425,19 @@ brw_pixel_interp_desc(UNUSED const struct intel_device_info *devinfo,
            SET_BITS(simd_mode, 16, 16));
 }
 
+static inline enum gfx12_systolic_depth
+translate_systolic_depth(unsigned d)
+{
+   /* Could also return (ffs(d) - 1) & 3. */
+   switch (d) {
+   case 2:  return BRW_SYSTOLIC_DEPTH_2;
+   case 4:  return BRW_SYSTOLIC_DEPTH_4;
+   case 8:  return BRW_SYSTOLIC_DEPTH_8;
+   case 16: return BRW_SYSTOLIC_DEPTH_16;
+   default: unreachable("Invalid systolic depth.");
+   }
+}
+
 /**
  * Send message to shared unit \p sfid with a possibly indirect descriptor \p
  * desc.  If \p desc is not an immediate it will be transparently loaded to an
@@ -1515,16 +1534,6 @@ void brw_CMPN(struct brw_codegen *p,
 brw_eu_inst *brw_DPAS(struct brw_codegen *p, enum gfx12_systolic_depth sdepth,
                    unsigned rcount, struct brw_reg dest, struct brw_reg src0,
                    struct brw_reg src1, struct brw_reg src2);
-
-void
-brw_memory_fence(struct brw_codegen *p,
-                 struct brw_reg dst,
-                 struct brw_reg src,
-                 enum opcode send_op,
-                 enum brw_message_target sfid,
-                 uint32_t desc,
-                 bool commit_enable,
-                 unsigned bti);
 
 void
 brw_broadcast(struct brw_codegen *p,
